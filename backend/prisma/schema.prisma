@@ -1,0 +1,430 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// -------------------------------------
+// CORE IDENTITIES & ACCESS
+// -------------------------------------
+model User {
+  id        String   @id @default(uuid())
+  email     String?  @unique
+  phone     String?  @unique
+  password  String?  // Hashed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastLogin DateTime?
+  isActive  Boolean  @default(true)
+
+  roles     Role[]   @relation("UserRoles")
+  worker    Worker?
+  doctor    Doctor?
+  
+  auditLogs AuditLog[]
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // e.g., ASHA, DOCTOR, ADMIN
+  description String?
+  permissions Permission[] @relation("RolePermissions")
+  users       User[]       @relation("UserRoles")
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  action      String   @unique // e.g., "patient.read", "assessment.create"
+  description String?
+  roles       Role[]   @relation("RolePermissions")
+}
+
+model Worker {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  facilityId String?
+  facility  Facility? @relation(fields: [facilityId], references: [id])
+  type      String   // ASHA, ANM, etc.
+  
+  followUps FollowUp[]
+  tasks     Task[]
+}
+
+model Doctor {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  specialist Specialist?
+  
+  facilities FacilityDoctor[]
+  appointments Appointment[]
+  queueEntries QueueEntry[]
+}
+
+model Specialist {
+  id        String   @id @default(uuid())
+  doctorId  String   @unique
+  doctor    Doctor   @relation(fields: [doctorId], references: [id])
+  specialty String   // Cardiology, Pediatrics, etc.
+}
+
+// -------------------------------------
+// FACILITY & OPERATIONS
+// -------------------------------------
+model Facility {
+  id        String   @id @default(uuid())
+  name      String
+  type      String   // CHC, PHC, District Hospital
+  level     Int      // 1, 2, 3
+  address   String?
+  latitude  Float?
+  longitude Float?
+  
+  services      FacilityService[]
+  capacities    FacilityCapacity[]
+  availability  FacilityAvailability?
+  
+  doctors       FacilityDoctor[]
+  workers       Worker[]
+  encounters    Encounter[]
+  appointments  Appointment[]
+  referralsIn   Referral[] @relation("ReferralDestination")
+  referralsOut  Referral[] @relation("ReferralOrigin")
+}
+
+model FacilityDoctor {
+  facilityId String
+  doctorId   String
+  facility   Facility @relation(fields: [facilityId], references: [id])
+  doctor     Doctor   @relation(fields: [doctorId], references: [id])
+  
+  @@id([facilityId, doctorId])
+}
+
+model FacilityService {
+  id         String   @id @default(uuid())
+  facilityId String
+  facility   Facility @relation(fields: [facilityId], references: [id])
+  service    String   // e.g., "X-Ray", "Blood Bank"
+  isAvailable Boolean @default(true)
+}
+
+model FacilityCapacity {
+  id         String   @id @default(uuid())
+  facilityId String
+  facility   Facility @relation(fields: [facilityId], references: [id])
+  resource   String   // e.g., "ICU Beds"
+  total      Int
+  occupied   Int
+  updatedAt  DateTime @updatedAt
+}
+
+model FacilityAvailability {
+  id         String   @id @default(uuid())
+  facilityId String   @unique
+  facility   Facility @relation(fields: [facilityId], references: [id])
+  status     String   // "OPEN", "CLOSED", "OVERCAPACITY"
+  readinessScore Float?
+  updatedAt  DateTime @updatedAt
+}
+
+// -------------------------------------
+// PATIENT DOMAIN
+// -------------------------------------
+model Patient {
+  id        String   @id @default(uuid())
+  name      String
+  dob       DateTime?
+  age       Int?
+  gender    String
+  village   String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  identifiers PatientIdentifier[]
+  consents    Consent[]
+  encounters  Encounter[]
+  assessments Assessment[]
+  conditions  Condition[]
+  referrals   Referral[]
+  appointments Appointment[]
+  followUps   FollowUp[]
+}
+
+model PatientIdentifier {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  type      String   // ABHA, LOCAL_ID
+  value     String   @unique
+}
+
+model Consent {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  grantedTo String   // Role or User ID
+  purpose   String
+  expiresAt DateTime?
+}
+
+// -------------------------------------
+// CLINICAL DOMAIN
+// -------------------------------------
+model Encounter {
+  id          String   @id @default(uuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  facilityId  String?
+  facility    Facility? @relation(fields: [facilityId], references: [id])
+  type        String   // FIELD_VISIT, CLINIC_VISIT
+  status      String   // IN_PROGRESS, COMPLETED
+  start       DateTime @default(now())
+  end         DateTime?
+  
+  assessments Assessment[]
+  vitals      Vital[]
+  clinicalObs ClinicalObservation[]
+  prescriptions Prescription[]
+}
+
+model Assessment {
+  id          String   @id @default(uuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  encounterId String?
+  encounter   Encounter? @relation(fields: [encounterId], references: [id])
+  symptoms    Symptom[]
+  
+  provenance  String   // WORKER_RECORDED, SYSTEM_DERIVED
+  createdAt   DateTime @default(now())
+  
+  aiRecommendations AIRecommendation[]
+}
+
+model Symptom {
+  id           String   @id @default(uuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id])
+  name         String
+  duration     String?
+  severity     String?  // MILD, MODERATE, SEVERE
+}
+
+model Vital {
+  id          String   @id @default(uuid())
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  type        String   // BP, HR, TEMP, SPO2
+  value       String
+  unit        String
+  measuredAt  DateTime @default(now())
+}
+
+model ClinicalObservation {
+  id          String   @id @default(uuid())
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  note        String
+  provenance  String   // DOCTOR_RECORDED
+  createdAt   DateTime @default(now())
+}
+
+model Condition {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  name      String
+  status    String   // ACTIVE, RESOLVED
+  diagnosedAt DateTime?
+}
+
+model Medication {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  type      String   // TABLET, SYRUP
+  stock     Int      @default(0) // Simplistic stock for hackathon
+}
+
+model Prescription {
+  id          String   @id @default(uuid())
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  medication  String
+  dosage      String
+  duration    String
+  instructions String?
+}
+
+model DiagnosticOrder {
+  id          String   @id @default(uuid())
+  testName    String
+  status      String   // PENDING, COMPLETED
+  results     DiagnosticResult[]
+}
+
+model DiagnosticResult {
+  id          String   @id @default(uuid())
+  orderId     String
+  order       DiagnosticOrder @relation(fields: [orderId], references: [id])
+  resultValue String
+  isAbnormal  Boolean  @default(false)
+}
+
+// -------------------------------------
+// WORKFLOW DOMAIN (Appointments & Queues)
+// -------------------------------------
+model Appointment {
+  id          String   @id @default(uuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  facilityId  String
+  facility    Facility @relation(fields: [facilityId], references: [id])
+  doctorId    String?
+  doctor      Doctor?  @relation(fields: [doctorId], references: [id])
+  
+  scheduledAt DateTime
+  status      String   // BOOKED, CANCELLED, COMPLETED
+  
+  queueEntry  QueueEntry?
+}
+
+model QueueEntry {
+  id            String   @id @default(uuid())
+  appointmentId String?  @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  doctorId      String?
+  doctor        Doctor?  @relation(fields: [doctorId], references: [id])
+  
+  priority      Int      @default(0)
+  status        String   // WAITING, PRIORITY, IN_CONSULTATION, COMPLETED
+  arrivalTime   DateTime @default(now())
+}
+
+// -------------------------------------
+// REFERRAL & CLOSED LOOP DOMAIN
+// -------------------------------------
+model Referral {
+  id             String   @id @default(uuid())
+  patientId      String
+  patient        Patient  @relation(fields: [patientId], references: [id])
+  originId       String
+  origin         Facility @relation("ReferralOrigin", fields: [originId], references: [id])
+  destinationId  String
+  destination    Facility @relation("ReferralDestination", fields: [destinationId], references: [id])
+  
+  reason         String
+  urgency        String   // ROUTINE, PRIORITY, URGENT
+  status         String   // CREATED, SUBMITTED, ACCEPTED, SCHEDULED...
+  
+  events         ReferralEvent[]
+  counterReferral CounterReferral?
+}
+
+model ReferralEvent {
+  id         String   @id @default(uuid())
+  referralId String
+  referral   Referral @relation(fields: [referralId], references: [id])
+  statusFrom String?
+  statusTo   String
+  notes      String?
+  createdAt  DateTime @default(now())
+}
+
+model CounterReferral {
+  id         String   @id @default(uuid())
+  referralId String   @unique
+  referral   Referral @relation(fields: [referralId], references: [id])
+  outcome    String
+  treatment  String?
+  instructions String?
+  
+  requiresFollowUp Boolean @default(false)
+}
+
+model FollowUp {
+  id          String    @id @default(uuid())
+  workerId    String?
+  worker      Worker?   @relation(fields: [workerId], references: [id])
+  patientId   String
+  patient     Patient   @relation(fields: [patientId], references: [id])
+
+  dueDate     DateTime
+  reason      String
+  notes       String?   // Medications and additional doctor instructions
+  status      String    // PENDING, COMPLETED, OVERDUE
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+model Task {
+  id         String   @id @default(uuid())
+  workerId   String?
+  worker     Worker?  @relation(fields: [workerId], references: [id])
+  type       String   // CARE_GAP, GENERAL
+  status     String   // PENDING, COMPLETED
+  priority   String
+  dueDate    DateTime?
+}
+
+// -------------------------------------
+// AI & SYSTEM DOMAIN
+// -------------------------------------
+model AIRecommendation {
+  id           String   @id @default(uuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id])
+  
+  urgencyCategory String // ROUTINE, PRIORITY, URGENT
+  reasons      Json     // Array of strings
+  confidence   Float
+  
+  humanConfirmed Boolean?
+  overrideReason String?
+  createdAt    DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  resource  String
+  resourceId String?
+  timestamp DateTime @default(now())
+}
+
+model SyncOperation {
+  id              String   @id
+  deviceId        String
+  userId          String
+  entity          String
+  entityId        String
+  operation       String   // CREATE, UPDATE, DELETE
+  payload         Json
+  clientTimestamp DateTime
+  status          String   // SUCCESS, CONFLICT, ERROR
+}
+
+model ExternalReference {
+  id          String   @id @default(uuid())
+  internalId  String
+  entityType  String
+  externalSystem String // e.g., "ABDM"
+  externalId  String
+}
