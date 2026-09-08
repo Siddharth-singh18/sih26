@@ -6,3 +6,7 @@ coverage/
 .env.*
 !.env.example
 !.env.template
+
+# Python generated files
+__pycache__/
+*.py[cod]
