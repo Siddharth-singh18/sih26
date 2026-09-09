@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import { prisma } from '../../index';
+import { broadcastReferralOperational, broadcastUrgentEscalation } from '../../events/socket';
+import { createNotification } from '../notifications/notification.service';
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
   'CREATED': ['SUBMITTED', 'CANCELLED'],
@@ -68,6 +70,40 @@ export const createReferral = async (req: Request, res: Response) => {
       return ref;
     });
 
+    // Part B & H: Emit REFERRAL_OPERATIONAL_UPDATE
+    broadcastReferralOperational(referral.originId, referral.destinationId, {
+      referralId: referral.id,
+      status: referral.status,
+      urgency: referral.urgency,
+      reason: referral.reason
+    });
+
+    // Part H & L: If urgent or emergency, emit URGENT_ESCALATION and notify assigned facility doctors
+    if (referral.urgency === 'URGENT' || referral.urgency === 'EMERGENCY') {
+      broadcastUrgentEscalation(referral.destinationId, {
+        escalationType: 'REFERRAL_URGENT',
+        entityId: referral.id,
+        urgency: referral.urgency,
+        reason: referral.reason
+      });
+
+      try {
+        const assignedDocs = await prisma.facilityDoctor.findMany({
+          where: { facilityId: referral.destinationId },
+          include: { doctor: { select: { userId: true } } }
+        });
+        for (const fd of assignedDocs) {
+          if (fd.doctor?.userId) {
+            await createNotification(
+              fd.doctor.userId,
+              'URGENT_ESCALATION',
+              `Urgent referral received: ${referral.urgency} priority for ${referral.reason}`
+            );
+          }
+        }
+      } catch {}
+    }
+
     res.status(201).json(referral);
   } catch (error) {
     console.error('Error creating referral:', error);
@@ -123,6 +159,14 @@ export const updateReferralStatus = async (req: Request, res: Response) => {
       });
 
       return updatedRef;
+    });
+
+    // Part B & H: Emit REFERRAL_OPERATIONAL_UPDATE on transition
+    broadcastReferralOperational(updated.originId, updated.destinationId, {
+      referralId: updated.id,
+      status: updated.status,
+      urgency: updated.urgency,
+      reason: updated.reason
     });
 
     res.json(updated);

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../../index';
+import { recordAuditLog } from '../audit/audit.service';
 
 /**
  * CONFLICT RESOLUTION
@@ -21,11 +22,16 @@ export const resolveSyncConflict = async (req: Request, res: Response) => {
     await prisma.$transaction(async (tx) => {
       const payloadObj = typeof resolvedPayload === 'string'
         ? JSON.parse(resolvedPayload)
-        : resolvedPayload;
+        : (resolvedPayload || {});
 
       if (resolutionStrategy === 'OVERWRITE_SERVER') {
         if (operation.entity === 'PATIENT') {
           await tx.patient.update({
+            where: { id: payloadObj.id || operation.entityId },
+            data: payloadObj.data || payloadObj
+          });
+        } else if (operation.entity === 'FOLLOWUP') {
+          await tx.followUp.update({
             where: { id: payloadObj.id || operation.entityId },
             data: payloadObj.data || payloadObj
           });
@@ -49,6 +55,8 @@ export const resolveSyncConflict = async (req: Request, res: Response) => {
             });
           }
         }
+      } else if (resolutionStrategy === 'KEEP_SERVER') {
+        // Deterministic: Server state retained as source of truth; client acknowledges server state
       }
 
       // Mark the conflict operation status as RESOLVED
@@ -56,12 +64,21 @@ export const resolveSyncConflict = async (req: Request, res: Response) => {
         where: { id: operationId },
         data: { status: 'RESOLVED' }
       });
+
+      // Audit trail of conflict resolution
+      await recordAuditLog({
+        userId: (req as any).user?.id || operation.userId,
+        action: 'SYNC_CONFLICT_RESOLVED',
+        resource: operation.entity,
+        resourceId: operation.entityId
+      }, tx);
     });
 
     res.json({
       message: 'Conflict resolved successfully',
       operationId,
-      strategy: resolutionStrategy
+      strategy: resolutionStrategy,
+      status: 'RESOLVED'
     });
   } catch (error: any) {
     console.error('Error resolving sync conflict:', error);

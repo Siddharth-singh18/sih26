@@ -75,7 +75,8 @@ export const login = async (req: Request, res: Response) => {
       }
     } else if (primaryRole === 'PATIENT') {
       const patient = await prisma.patient.findFirst({
-        where: { phone: { in: phoneVariants } }
+        where: { phone: { in: phoneVariants } },
+        orderBy: { createdAt: 'asc' }
       });
       if (patient) {
         patientId = patient.id;

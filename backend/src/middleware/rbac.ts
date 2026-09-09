@@ -34,3 +34,21 @@ export const requireRole = (requiredRole: string) => {
     next();
   };
 };
+
+export const requireAnyRole = (allowedRoles: string[]) => {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'User not authenticated' });
+    }
+
+    const hasRole = req.user.roles.some((r: string) => allowedRoles.includes(r)) || req.user.roles.includes('ADMIN');
+    if (!hasRole) {
+      return res.status(403).json({ 
+        error: 'Forbidden', 
+        message: `Missing required role. Allowed roles: ${allowedRoles.join(', ')}` 
+      });
+    }
+
+    next();
+  };
+};

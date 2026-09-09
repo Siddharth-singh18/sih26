@@ -188,77 +188,159 @@ export const handleRoute = async (req: Request, res: Response) => {
   }
 
   try {
-    const requiredSpecialty = req.body.requiredSpecialty || req.body.specialty || '';
-    const facilities = await prisma.facility.findMany({
-      include: {
-        services: true,
-        availability: true,
-        capacities: true
+    const { calculateOptimalRoutes, ROUTING_WEIGHTS } = await import('../routing/routing.service');
+    const ranked = await calculateOptimalRoutes(req.body);
+
+    const totalEvaluated = ranked.length;
+    const eligibleCount = ranked.filter((f) => f.eligible).length;
+    const ineligibleCount = totalEvaluated - eligibleCount;
+    const hasCalculatedDistance = ranked.some((f) => f.distanceStatus === 'CALCULATED');
+    const distanceHandling = hasCalculatedDistance ? 'CALCULATED' : 'NOT_SUPPORTED_BY_SCHEMA';
+
+    return res.json({
+      ranked_facilities: ranked,
+      meta: {
+        totalEvaluated,
+        eligibleCount,
+        ineligibleCount,
+        urgency: (req.body.urgency || 'ROUTINE').toUpperCase(),
+        weightsUsed: ROUTING_WEIGHTS,
+        distanceHandling
       }
     });
-
-    const ranked = facilities.map((fac, idx) => {
-      let score = 80;
-      const reasons: string[] = [];
-
-      // Readiness score contribution
-      const readiness = fac.availability?.readinessScore || 75;
-      score += Math.round((readiness - 50) * 0.3);
-
-      if (fac.availability?.status === 'OPEN') {
-        reasons.push('Facility operational & accepting referrals');
-      } else if (fac.availability?.status === 'OVERCAPACITY') {
-        score -= 20;
-        reasons.push('High occupancy / near capacity');
-      }
-
-      // Bed capacities
-      const icuBeds = fac.capacities.find(c => c.resource.toLowerCase().includes('icu'));
-      if (icuBeds && icuBeds.total > icuBeds.occupied) {
-        reasons.push(`${icuBeds.total - icuBeds.occupied} ICU beds available`);
-        score += 10;
-      }
-
-      // Specialty match
-      if (requiredSpecialty) {
-        const hasSpec = fac.services.some(s => s.service.toLowerCase().includes(requiredSpecialty.toLowerCase()));
-        if (hasSpec) {
-          score += 15;
-          reasons.push(`Specialty service available: ${requiredSpecialty}`);
-        }
-      }
-
-      if (fac.level === 3) {
-        reasons.push('Tertiary multi-specialty capability');
-        score += 10;
-      } else if (fac.level === 2) {
-        reasons.push('Secondary care & emergency observation');
-        score += 5;
-      }
-
-      return {
-        facility_id: fac.id,
-        facility_name: fac.name,
-        type: fac.type,
-        level: fac.level,
-        distance_km: Math.round((idx + 1) * 6.2 * 10) / 10,
-        estimated_travel_time_minutes: (idx + 1) * 15,
-        score: Math.min(99, Math.max(40, score)),
-        readiness_score: readiness,
-        is_alternative: idx > 0,
-        freshness_penalty_applied: false,
-        reasons: reasons.slice(0, 3)
-      };
-    }).sort((a, b) => b.score - a.score);
-
-    res.json({ ranked_facilities: ranked });
-    const { calculateOptimalRoutes } = await import('../routing/routing.service');
-    const ranked = await calculateOptimalRoutes(req.body);
-    return res.json({ ranked_facilities: ranked });
   } catch (error: any) {
     console.error('Error calculating facility routes:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 };
+
+// -------------------------------------------------------------
+// CONTROLLED OPERATIONAL INTELLIGENCE AGENT (PART J & K)
+// -------------------------------------------------------------
+
+import { AuthRequest } from '../../middleware/auth';
+import {
+  analyzeOperationalEvent,
+  approveAgentRecommendation,
+  rejectAgentRecommendation,
+  modifyAgentRecommendation,
+  listAgentRecommendations,
+  generateOperationalIntelligenceSummary,
+  generatePredictiveInterpretation
+} from './operational_agent.service';
+
+export const getAgentRecommendations = async (req: Request, res: Response) => {
+  try {
+    const { facilityId } = req.query;
+    const recs = listAgentRecommendations(facilityId ? String(facilityId) : undefined);
+    res.json(recs);
+  } catch {
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+export const handleApproveAgentAction = async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const { id } = req.params;
+    const userId = authReq.user?.id || 'system';
+    const roles = authReq.user?.roles || [];
+
+    const result = await approveAgentRecommendation(id, userId, roles);
+    if (!result.success) {
+      const status = result.message.includes('Forbidden') ? 403 : 400;
+      return res.status(status).json({ error: result.message });
+    }
+    res.json(result);
+  } catch {
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+export const handleRejectAgentAction = async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const { id } = req.params;
+    const { reason } = req.body;
+    const userId = authReq.user?.id || 'system';
+
+    const result = await rejectAgentRecommendation(id, userId, reason);
+    if (!result.success) {
+      return res.status(400).json({ error: result.message });
+    }
+    res.json(result);
+  } catch {
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+export const handleModifyAgentAction = async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const { id } = req.params;
+    const { modifications } = req.body;
+    const userId = authReq.user?.id || 'system';
+
+    if (!modifications || typeof modifications !== 'object') {
+      return res.status(400).json({ error: 'Modifications object required' });
+    }
+
+    const result = await modifyAgentRecommendation(id, userId, modifications);
+    if (!result.success) {
+      return res.status(400).json({ error: result.message });
+    }
+    res.json(result);
+  } catch {
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+export const triggerOperationalAgentAnalysis = async (req: Request, res: Response) => {
+  try {
+    const { eventType, facilityId, entityId, eventData } = req.body;
+    if (!facilityId) {
+      return res.status(400).json({ error: 'facilityId is required' });
+    }
+    const rec = await analyzeOperationalEvent(
+      eventType || 'MANUAL_TRIGGER',
+      facilityId,
+      entityId || facilityId,
+      eventData || {}
+    );
+    res.json({ success: true, recommendation: rec });
+  } catch {
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+export const getAgentOperationalSummary = async (req: Request, res: Response) => {
+  try {
+    const { facilityId } = req.query;
+    const summary = await generateOperationalIntelligenceSummary(facilityId ? String(facilityId) : undefined);
+    res.json(summary);
+  } catch (error) {
+    console.error('Error generating operational intelligence summary:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+export const getAgentPredictiveInterpretation = async (req: Request, res: Response) => {
+  try {
+    if ((req as any).user?.roles?.includes('PATIENT')) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Patients are not permitted to access agent predictive interpretations'
+      });
+    }
+
+    const { facilityId } = req.query;
+    const interpretation = await generatePredictiveInterpretation(facilityId ? String(facilityId) : undefined);
+    res.json(interpretation);
+  } catch (error) {
+    console.error('Error generating agent predictive interpretation:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+
 

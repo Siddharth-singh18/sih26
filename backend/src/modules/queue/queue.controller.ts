@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../../index';
-import { broadcastQueueUpdate } from '../../events/socket';
+import { broadcastQueueUpdate, broadcastQueueLoad } from '../../events/socket';
 import { AuthRequest } from '../../middleware/auth';
 
 // 21. QUEUE ENGINE: Explicit queue states
@@ -58,6 +58,22 @@ export const enqueuePatient = async (req: Request, res: Response) => {
       broadcastQueueUpdate(queueEntry.appointment.facilityId, doctorId, {
         action: 'ENQUEUE',
         entry: queueEntry
+      });
+
+      // Part B & G: Query real queue load and emit QUEUE_LOAD_CHANGED
+      const activeCount = await prisma.queueEntry.count({
+        where: {
+          status: { in: ['WAITING', 'PRIORITY', 'IN_CONSULTATION'] },
+          appointment: { facilityId: queueEntry.appointment.facilityId }
+        }
+      });
+      broadcastQueueLoad(queueEntry.appointment.facilityId, {
+        activeQueueCount: activeCount,
+        entryId: queueEntry.id,
+        doctorId,
+        patientId: queueEntry.appointment.patientId,
+        action: 'ENQUEUE',
+        status: queueEntry.status
       });
     }
 
@@ -175,6 +191,22 @@ export const updateQueueStatus = async (req: Request, res: Response) => {
         { action: 'UPDATE_STATUS', entry: updated },
         updated.appointment.patientId
       );
+
+      // Part B & G: Query real queue load and emit QUEUE_LOAD_CHANGED
+      const activeCount = await prisma.queueEntry.count({
+        where: {
+          status: { in: ['WAITING', 'PRIORITY', 'IN_CONSULTATION'] },
+          appointment: { facilityId: updated.appointment.facilityId }
+        }
+      });
+      broadcastQueueLoad(updated.appointment.facilityId, {
+        activeQueueCount: activeCount,
+        entryId: updated.id,
+        doctorId: updated.doctorId,
+        patientId: updated.appointment.patientId,
+        action: 'UPDATE_STATUS',
+        status: updated.status
+      });
     }
 
     res.json(updated);

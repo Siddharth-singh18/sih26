@@ -25,12 +25,12 @@ export const createNotificationHandler = async (req: Request, res: Response) => 
       }
     });
 
-    // Broadcast in real time via Socket.io
+    // Part L: Broadcast in real time scoped to target user room (no global leak)
     try {
       const io = getIO();
-      io.emit('notification:new', notif);
+      io.to(`user_${targetUserId}`).emit('notification:new', notif);
       if (type === 'CARE_GAP_ESCALATION') {
-        io.emit('care_gap:escalated', notif);
+        io.to(`user_${targetUserId}`).emit('care_gap:escalated', notif);
       }
     } catch {
       // Non-blocking

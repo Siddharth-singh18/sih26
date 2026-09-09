@@ -10,3 +10,6 @@ coverage/
 # Python generated files
 __pycache__/
 *.py[cod]
+
+# Build artifacts and cache
+*.tsbuildinfo

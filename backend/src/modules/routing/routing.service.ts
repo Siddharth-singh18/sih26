@@ -1,15 +1,7 @@
-import { prisma } from '../../index';
 import { PrismaClient } from '@prisma/client';
-import { prisma as defaultPrisma } from '../../index';
 
-// 43. INTELLIGENT ROUTING ENGINE
-export const getOptimalFacilities = async (patientLat: number, patientLon: number, requiredSpecialty?: string) => {
-  try {
-    // 1. Fetch available facilities
-    const facilities = await prisma.facility.findMany({
-      include: {
-        services: true,
-        availability: true
+const defaultPrisma = new PrismaClient();
+
 export interface RoutePatientLocation {
   latitude?: number | null;
   longitude?: number | null;
@@ -20,12 +12,16 @@ export interface RoutePatientLocation {
 
 export interface RouteRequest {
   condition?: string;
-  urgency?: 'EMERGENCY' | 'URGENT' | 'ROUTINE' | string;
+  urgency?: 'EMERGENCY' | 'URGENT' | 'ROUTINE' | 'PRIORITY' | string;
   requiredSpecialty?: string;
   specialty?: string;
   requiredService?: string;
+  requiredBedType?: 'ICU' | 'OXYGEN' | 'MATERNITY' | 'NICU' | 'GENERAL' | string;
   patientLocation?: RoutePatientLocation | null;
   originFacilityId?: string;
+  excludeFacilityIds?: string[];
+  maxDistanceKm?: number;
+  limit?: number;
 }
 
 export interface RoutingFactors {
@@ -46,20 +42,51 @@ export interface CapacityResourceSummary {
   available: number;
 }
 
+export interface CapabilityMatchSummary {
+  service: boolean;
+  specialty: boolean;
+  capacity: boolean;
+  level: boolean;
+  urgency: boolean;
+}
+
 export interface FacilityRouteResult {
+  // Primary Identifiers
+  facilityId: string;
   facility_id: string;
+  facilityName: string;
   facility_name: string;
+  facilityType: string;
   type: string;
   level: number;
+
+  // Eligibility Separation
+  eligible: boolean;
+  isEligible: boolean;
+  ineligibilityReasons: string[];
+
+  // Geographic Distance
   distance_km: number | null;
+  distance: number | string | null;
   estimated_travel_time_minutes: number | null;
+  distanceStatus: 'CALCULATED' | 'NOT_SUPPORTED_BY_SCHEMA';
+  distanceReason?: string;
+
+  // Scoring & Readiness
   score: number;
   readiness_score: number;
+  readiness: number;
   is_alternative: boolean;
   freshness_penalty_applied: boolean;
+
+  // Explainability & Breakdown
   reasons: string[];
   factors: RoutingFactors;
+  capabilityMatch: CapabilityMatchSummary;
   active_queue_count: number;
+  queueLoad: number;
+
+  // Capacities
   capacities_summary: {
     general_beds: CapacityResourceSummary;
     icu_beds: CapacityResourceSummary;
@@ -70,6 +97,20 @@ export interface FacilityRouteResult {
     total_occupied: number;
     total_available: number;
   };
+  capacity: {
+    total_beds: number;
+    total_occupied: number;
+    total_available: number;
+    icu_available: number;
+    oxygen_available: number;
+    maternity_available: number;
+  };
+
+  // Operational State
+  availability: string;
+  serviceMatch: boolean;
+  specialtyMatch: boolean;
+  urgencySuitability: number;
 }
 
 export const ROUTING_WEIGHTS = {
@@ -180,11 +221,12 @@ export async function calculateOptimalRoutes(
 
   const requiredSpecialty = (params.requiredSpecialty || params.specialty || '').trim();
   const requiredService = (params.requiredService || '').trim();
+  const requiredBedType = (params.requiredBedType || '').toUpperCase().trim();
   const urgency = (params.urgency || 'ROUTINE').toUpperCase().trim();
   const patientLocation = params.patientLocation;
 
   // 1. Fetch live facilities with services, capacities, availability, and doctors
-  const facilities = await db.facility.findMany({
+  let facilities = await db.facility.findMany({
     include: {
       services: true,
       availability: true,
@@ -198,17 +240,13 @@ export async function calculateOptimalRoutes(
           }
         }
       }
-    });
     }
   });
 
-    // 2. Score them based on: Load (Queue length), Readiness, Distance (Mocked here), Specialty
-    const scored = facilities.map(f => {
-      let score = 100;
-      
-      // Load penalty
-      const queueLength = 0; // Mocked for now since queue is not on Facility
-      score -= (queueLength * 5); // Reduce score for high load
+  if (params.excludeFacilityIds && Array.isArray(params.excludeFacilityIds) && params.excludeFacilityIds.length > 0) {
+    facilities = facilities.filter(f => !params.excludeFacilityIds!.includes(f.id));
+  }
+
   // 2. Fetch live active queue entries to determine real operational load
   const activeQueueEntries = await db.queueEntry.findMany({
     where: {
@@ -222,9 +260,6 @@ export async function calculateOptimalRoutes(
     }
   });
 
-      // Readiness factor
-      if (f.availability?.readinessScore) {
-        score += (f.availability.readinessScore - 50); // Boost or penalize based on ops readiness
   // Aggregate active queue counts per facility
   const facilityQueueMap: Record<string, number> = {};
   for (const entry of activeQueueEntries) {
@@ -258,10 +293,11 @@ export async function calculateOptimalRoutes(
       : (patientLocation!.lng ?? patientLocation!.lon!)
     : null;
 
-  // 3. Score each facility
-  const scoredFacilities = facilities.map((fac) => {
+  // 3. Score and evaluate each facility
+  const scoredFacilities: FacilityRouteResult[] = facilities.map((fac) => {
     let score = ROUTING_WEIGHTS.BASE_SCORE;
     const reasons: string[] = [];
+    const ineligibilityReasons: string[] = [];
 
     // --- FACTOR 1: READINESS SCORE ---
     const readiness = fac.availability?.readinessScore ?? 75;
@@ -280,6 +316,8 @@ export async function calculateOptimalRoutes(
     } else if (availStatus === 'CLOSED') {
       availabilityScore = ROUTING_WEIGHTS.AVAILABILITY.CLOSED_PENALTY;
       reasons.push('Facility currently closed for non-emergency intake');
+      reasons.push('Facility currently closed for patient intake');
+      ineligibilityReasons.push('Facility status is currently CLOSED for intake');
     }
     score += availabilityScore;
 
@@ -313,10 +351,6 @@ export async function calculateOptimalRoutes(
       }
     }
 
-      // Hard filter for specialty
-      let hasSpecialty = true;
-      if (requiredSpecialty) {
-        hasSpecialty = f.services.some((s: any) => s.service.toLowerCase().includes(requiredSpecialty.toLowerCase()));
     const icuAvail = Math.max(0, icuTotal - icuOcc);
     const oxyAvail = Math.max(0, oxyTotal - oxyOcc);
     const genAvail = Math.max(0, genTotal - genOcc);
@@ -325,7 +359,7 @@ export async function calculateOptimalRoutes(
 
     const totalBeds = genTotal + icuTotal + oxyTotal + matTotal + nicuTotal;
     const totalOccupied = genOcc + icuOcc + oxyOcc + matOcc + nicuOcc;
-    const totalAvailable = totalBeds - totalOccupied;
+    const totalAvailable = Math.max(0, totalBeds - totalOccupied);
 
     let capacityScore = 0;
 
@@ -345,6 +379,7 @@ export async function calculateOptimalRoutes(
 
     if (matAvail > 0) {
       capacityScore += ROUTING_WEIGHTS.CAPACITY.MATERNITY_BED_AVAILABLE_BOOST;
+      reasons.push(`${matAvail} Maternity/delivery beds available`);
     }
 
     if (nicuAvail > 0) {
@@ -357,34 +392,49 @@ export async function calculateOptimalRoutes(
       reasons.push('All facility beds fully occupied');
     }
 
+    // Specific requested bed type eligibility check
+    let capacityMatch = true;
+    if (requiredBedType === 'ICU' && icuAvail === 0) {
+      capacityMatch = false;
+      ineligibilityReasons.push('Zero ICU beds available for critical care requirement');
+    } else if (requiredBedType === 'MATERNITY' && matAvail === 0) {
+      capacityMatch = false;
+      ineligibilityReasons.push('Zero maternity delivery beds available');
+    } else if (requiredBedType === 'OXYGEN' && oxyAvail === 0) {
+      capacityMatch = false;
+      ineligibilityReasons.push('Zero oxygen-supported beds available');
+    } else if (requiredBedType === 'NICU' && nicuAvail === 0) {
+      capacityMatch = false;
+      ineligibilityReasons.push('Zero neonatal ICU beds available');
+    }
+
     score += capacityScore;
 
     // --- FACTOR 4: REQUIRED SERVICE MATCHING ---
     let serviceMatchScore = 0;
+    let hasMatchedService = false;
     if (requiredService) {
       const reqLower = requiredService.toLowerCase();
       const matchedService = fac.services.find(
         (s) => s.isAvailable !== false && s.service.toLowerCase().includes(reqLower)
       );
       if (matchedService) {
+        hasMatchedService = true;
         serviceMatchScore = ROUTING_WEIGHTS.SERVICE_MATCH_BOOST;
         reasons.push(`Required service available: ${matchedService.service}`);
       } else {
+        hasMatchedService = false;
+        ineligibilityReasons.push(`Required clinical service "${requiredService}" unavailable at this facility`);
         reasons.push(`Required service unavailable: ${requiredService}`);
       }
+    } else {
+      hasMatchedService = true;
     }
     score += serviceMatchScore;
 
-      return {
-        facilityId: f.id,
-        name: f.name,
-        type: f.type,
-        score,
-        queueLength,
-        isEligible: hasSpecialty && (f.availability?.status === 'ACTIVE' || !f.availability)
-      };
     // --- FACTOR 5: SPECIALTY AVAILABILITY ---
     let specialtyMatchScore = 0;
+    let hasMatchedSpecialty = false;
     if (requiredSpecialty) {
       const specLower = requiredSpecialty.toLowerCase();
       // Physical specialist assigned to facility
@@ -398,15 +448,22 @@ export async function calculateOptimalRoutes(
         (s) => s.isAvailable !== false && s.service.toLowerCase().includes(specLower)
       );
 
-      if (matchedDoctorSpecialist) {
+      if (matchedDoctorSpecialist && matchedDoctorSpecialist.doctor?.specialist?.specialty) {
+        hasMatchedSpecialty = true;
         specialtyMatchScore = ROUTING_WEIGHTS.SPECIALTY_ON_SITE_DOCTOR_BOOST;
         reasons.push(
-          `Specialist on-site: ${matchedDoctorSpecialist.doctor.specialist!.specialty}`
+          `Specialist on-site: ${matchedDoctorSpecialist.doctor.specialist.specialty}`
         );
       } else if (matchedServiceSpecialty) {
+        hasMatchedSpecialty = true;
         specialtyMatchScore = ROUTING_WEIGHTS.SPECIALTY_SERVICE_BOOST;
         reasons.push(`Specialty clinical service: ${matchedServiceSpecialty.service}`);
+      } else {
+        hasMatchedSpecialty = false;
+        ineligibilityReasons.push(`Required specialty "${requiredSpecialty}" is not available on-site or via clinical service`);
       }
+    } else {
+      hasMatchedSpecialty = true;
     }
     score += specialtyMatchScore;
 
@@ -424,9 +481,17 @@ export async function calculateOptimalRoutes(
 
     // --- FACTOR 7: URGENCY SUITABILITY ---
     let urgencyBonus = 0;
+    let urgencySuitable = true;
+
+    const hasTrauma = fac.services.some((s) => {
+      const sl = s.service.toLowerCase();
+      return sl.includes('trauma') || sl.includes('emergency');
+    });
+
     if (urgency === 'EMERGENCY') {
       if (fac.level === 3) {
         urgencyBonus += ROUTING_WEIGHTS.URGENCY.EMERGENCY.TERTIARY_BONUS;
+        reasons.push('Tertiary hospital with comprehensive emergency care capabilities');
       }
       if (icuAvail > 0) {
         urgencyBonus += ROUTING_WEIGHTS.URGENCY.EMERGENCY.ICU_REQUIRED_BONUS;
@@ -437,6 +502,14 @@ export async function calculateOptimalRoutes(
       });
       if (hasTrauma) {
         urgencyBonus += ROUTING_WEIGHTS.URGENCY.EMERGENCY.TRAUMA_CARE_BONUS;
+        reasons.push('Emergency & trauma resuscitation capability');
+      }
+
+      // Mandatory Emergency Exclusion Rule:
+      // Level 1 primary health centers without emergency/trauma services cannot accept critical emergency referrals
+      if (fac.level === 1 && !hasTrauma && icuAvail === 0) {
+        urgencySuitable = false;
+        ineligibilityReasons.push('Lacks required emergency resuscitation or ICU capability for an emergency patient');
       }
     } else if (urgency === 'URGENT') {
       if (fac.level >= 2) {
@@ -453,14 +526,21 @@ export async function calculateOptimalRoutes(
 
     // --- FACTOR 8: DISTANCE (HAVERSINE) ---
     let distance_km: number | null = null;
+    let distanceValue: number | string | null = null;
     let estimated_travel_time_minutes: number | null = null;
     let distancePenalty = 0;
+    let distanceStatus: 'CALCULATED' | 'NOT_SUPPORTED_BY_SCHEMA' = 'NOT_SUPPORTED_BY_SCHEMA';
+    let distanceReason = 'Patient or facility coordinates not provided or not supported by schema';
 
-    if (hasPatientCoords && pLat != null && pLon != null && typeof fac.latitude === 'number' && typeof fac.longitude === 'number') {
-      distance_km = haversineDistanceKm(pLat, pLon, fac.latitude, fac.longitude);
+    if (hasPatientCoords && pLat !== null && pLon !== null && typeof fac.latitude === 'number' && typeof fac.longitude === 'number') {
+      const dist = haversineDistanceKm(pLat, pLon, fac.latitude, fac.longitude);
+      distance_km = dist;
+      distanceValue = dist;
+      distanceStatus = 'CALCULATED';
+      distanceReason = `Calculated using Haversine formula based on registered facility coordinates (${fac.latitude}, ${fac.longitude})`;
       estimated_travel_time_minutes = Math.max(
         ROUTING_WEIGHTS.MIN_TRAVEL_TIME_MINS,
-        Math.round((distance_km / ROUTING_WEIGHTS.ESTIMATED_SPEED_KMH) * 60)
+        Math.round((dist / ROUTING_WEIGHTS.ESTIMATED_SPEED_KMH) * 60)
       );
 
       const kmRate =
@@ -470,12 +550,22 @@ export async function calculateOptimalRoutes(
           ? ROUTING_WEIGHTS.URGENCY.URGENT.DISTANCE_KM_PENALTY_RATE
           : ROUTING_WEIGHTS.URGENCY.ROUTINE.DISTANCE_KM_PENALTY_RATE;
 
-      distancePenalty = Math.round(distance_km * kmRate);
-      reasons.push(`~${distance_km} km away (~${estimated_travel_time_minutes} mins travel)`);
+      distancePenalty = Math.round(dist * kmRate);
+      reasons.push(`~${dist} km away (~${estimated_travel_time_minutes} mins travel)`);
     } else {
       distance_km = null;
+      distanceValue = 'NOT_SUPPORTED_BY_SCHEMA';
+      distanceStatus = 'NOT_SUPPORTED_BY_SCHEMA';
+      distanceReason = 'Patient or facility coordinates not provided or not supported by schema';
       estimated_travel_time_minutes = null;
       distancePenalty = 0;
+      reasons.push('Distance not calculated: Coordinates not provided or not supported by schema');
+    }
+
+    if (params.maxDistanceKm !== undefined && params.maxDistanceKm !== null && distance_km !== null) {
+      if (distance_km > params.maxDistanceKm) {
+        ineligibilityReasons.push(`Facility distance (${distance_km.toFixed(1)} km) exceeds maximum allowed radius of ${params.maxDistanceKm} km`);
+      }
     }
 
     score -= distancePenalty;
@@ -505,6 +595,8 @@ export async function calculateOptimalRoutes(
       Math.max(ROUTING_WEIGHTS.MIN_SCORE, Math.round(score))
     );
 
+    const isEligible = ineligibilityReasons.length === 0;
+
     const factors: RoutingFactors = {
       base_score: ROUTING_WEIGHTS.BASE_SCORE,
       readiness: readinessFactor,
@@ -513,24 +605,55 @@ export async function calculateOptimalRoutes(
       specialty_match: specialtyMatchScore,
       capacity: capacityScore,
       urgency_suitability: levelBoost + urgencyBonus,
-      queue_penalty: -queuePenalty,
-      distance_penalty: -distancePenalty,
+      queue_penalty: queuePenalty,
+      distance_penalty: distancePenalty,
+    };
+
+    const capabilityMatch: CapabilityMatchSummary = {
+      service: hasMatchedService,
+      specialty: hasMatchedSpecialty,
+      capacity: capacityMatch,
+      level: true,
+      urgency: urgencySuitable
     };
 
     return {
+      // Primary identifiers
+      facilityId: fac.id,
       facility_id: fac.id,
+      facilityName: fac.name,
       facility_name: fac.name,
+      facilityType: fac.type,
       type: fac.type,
       level: fac.level,
+
+      // Eligibility
+      eligible: isEligible,
+      isEligible,
+      ineligibilityReasons,
+
+      // Distance & Travel
       distance_km,
+      distance: distanceValue,
       estimated_travel_time_minutes,
+      distanceStatus,
+      distanceReason,
+
+      // Scoring
       score: finalScore,
-      readiness_score: readiness,
+      readiness_score: fac.availability?.readinessScore ?? 75,
+      readiness: fac.availability?.readinessScore ?? 75,
       is_alternative: false,
       freshness_penalty_applied: false,
-      reasons: reasons.slice(0, 4),
+
+      // Breakdown
+      reasons,
       factors,
+      capabilityMatch,
       active_queue_count: activeQueueCount,
+      queueLoad: activeQueueCount,
+
+      // Capacities
       capacities_summary: {
         general_beds: { total: genTotal, occupied: genOcc, available: genAvail },
         icu_beds: { total: icuTotal, occupied: icuOcc, available: icuAvail },
@@ -540,15 +663,45 @@ export async function calculateOptimalRoutes(
         total_beds: totalBeds,
         total_occupied: totalOccupied,
         total_available: totalAvailable,
-      }
+      },
+      capacity: {
+        total_beds: totalBeds,
+        total_occupied: totalOccupied,
+        total_available: totalAvailable,
+        icu_available: icuAvail,
+        oxygen_available: oxyAvail,
+        maternity_available: matAvail,
+      },
+
+      // Operational state
+      availability: availStatus,
+      serviceMatch: hasMatchedService,
+      specialtyMatch: hasMatchedSpecialty,
+      urgencySuitability: levelBoost + urgencyBonus,
     };
   });
 
-  // Sort descending by score
-  scoredFacilities.sort((a, b) => b.score - a.score);
+  // Multi-tier sorting:
+  // 1. Eligible first
+  // 2. Score descending
+  // 3. Facility Level descending (Tertiary > Secondary > Primary)
+  // 4. Facility Readiness descending
+  // 5. Active Queue ascending
+  const sortComparator = (a: FacilityRouteResult, b: FacilityRouteResult) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.level !== a.level) return b.level - a.level;
+    if (b.readiness !== a.readiness) return b.readiness - a.readiness;
+    return a.active_queue_count - b.active_queue_count;
+  };
 
-  // Mark alternative facilities (all except top candidate)
-  return scoredFacilities.map((fac, idx) => ({
+  const eligible = scoredFacilities.filter((f) => f.eligible).sort(sortComparator);
+  const ineligible = scoredFacilities.filter((f) => !f.eligible).sort(sortComparator);
+
+  const finalSorted = [...eligible, ...ineligible];
+  const resultList = params.limit && params.limit > 0 ? finalSorted.slice(0, params.limit) : finalSorted;
+
+  // Mark alternative facilities: top candidate is primary (false), remaining are alternatives (true)
+  return resultList.map((fac, idx) => ({
     ...fac,
     is_alternative: idx > 0,
   }));
@@ -570,16 +723,13 @@ export const getOptimalFacilities = async (
       urgency: 'ROUTINE',
     });
 
-    // Sort descending by score
-    return scored.filter(s => s.isEligible).sort((a, b) => b.score - a.score);
-
     return results.map((f) => ({
       facilityId: f.facility_id,
       name: f.facility_name,
       type: f.type,
       score: f.score,
       queueLength: f.active_queue_count,
-      isEligible: f.score > 20,
+      isEligible: f.eligible,
     }));
   } catch (error) {
     console.error('Routing Engine Error:', error);

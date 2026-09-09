@@ -24,7 +24,11 @@ import {
   ChevronRight,
   AlertCircle,
   Stethoscope,
+  Compass,
+  MapPin,
 } from 'lucide-react';
+import { useLanguage } from '../context/LanguageContext';
+import { FindNearbyCareModal } from '../components/routing/FindNearbyCareModal';
 
 interface FacilityDoctorItem {
   id?: string;
@@ -218,10 +222,12 @@ const DEFAULT_TIME_SLOTS = [
 ];
 
 export default function PatientDashboard() {
+  const { t } = useLanguage();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [actionSuccess, setActionSuccess] = useState('');
+  const [isNearbyCareOpen, setIsNearbyCareOpen] = useState(false);
 
   // Domain data states
   const [profile, setProfile] = useState<any>(null);
@@ -491,6 +497,13 @@ export default function PatientDashboard() {
   const village = profile?.village || summary?.patient?.village || 'Baramati / Khandala';
   const phone = profile?.phone || summary?.patient?.phone || 'Not provided';
   const patientId = profile?.id || summary?.patient?.id || '';
+  const patientInitials = patientName
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((n: string) => n[0])
+    .join('')
+    .toUpperCase() || 'P';
 
   // Lifecycle-based appointment separation
   const now = new Date();
@@ -548,12 +561,17 @@ export default function PatientDashboard() {
         title: f.action || 'Scheduled Care Follow-Up',
         subtitle: `Due: ${new Date(f.dueDate).toLocaleDateString('en-IN')} · ASHA Worker: ${f.assignedWorker?.name || 'Sunita Patil'}`,
         actionLabel: 'View Task',
+        title: f.action || t('care.scheduled_followup', 'Scheduled Care Follow-Up'),
+        subtitle: `${t('care.due', 'Due')}: ${new Date(f.dueDate).toLocaleDateString('en-IN')} · ${t('role.asha_worker', 'ASHA Worker')}: ${f.assignedWorker?.name || 'Sunita Patil'}`,
+        actionLabel: t('action.view_task', 'View Task'),
         onAction: () => {
           if (f.notes) alert(`ASHA Follow-Up Notes:
 
 ${f.notes}`);
+          if (f.notes) alert(`ASHA Follow-Up Notes:\n\n${f.notes}`);
         },
         badge: f.status === 'OVERDUE' ? { label: 'Overdue', color: 'bg-red-50 text-red-700 border-red-200' } : undefined,
+        badge: f.status === 'OVERDUE' ? { label: t('status.overdue', 'Overdue'), color: 'bg-red-50 text-red-700 border-red-200' } : undefined,
       });
     });
 
@@ -568,8 +586,12 @@ ${f.notes}`);
         title: `Lab Test: ${d.testName}`,
         subtitle: 'Sample under processing · Results pending',
         actionLabel: 'Track Test',
+        title: `${t('care.lab_test', 'Lab Test')}: ${d.testName}`,
+        subtitle: t('care.sample_processing', 'Sample under processing · Results pending'),
+        actionLabel: t('action.track_test', 'Track Test'),
         onAction: () => setIsAllDiagnosticsOpen(true),
         badge: { label: 'In Progress', color: 'bg-amber-50 text-amber-700 border-amber-200' },
+        badge: { label: t('status.in_progress', 'In Progress'), color: 'bg-amber-50 text-amber-700 border-amber-200' },
       });
     } else if (hasAbnormal) {
       const abnormalVal = d.results?.find((r) => r.isAbnormal)?.resultValue;
@@ -580,8 +602,12 @@ ${f.notes}`);
         title: `Lab Result: ${d.testName}`,
         subtitle: `Result: ${abnormalVal} · Doctor review advised`,
         actionLabel: 'View Report',
+        title: `${t('care.lab_result', 'Lab Result')}: ${d.testName}`,
+        subtitle: `${t('care.result', 'Result')}: ${abnormalVal} · ${t('care.doctor_review', 'Doctor review advised')}`,
+        actionLabel: t('action.view_report', 'View Report'),
         onAction: () => setIsAllDiagnosticsOpen(true),
         badge: { label: 'Abnormal', color: 'bg-red-50 text-red-700 border-red-200' },
+        badge: { label: t('status.abnormal', 'Abnormal'), color: 'bg-red-50 text-red-700 border-red-200' },
       });
     }
   });
@@ -591,6 +617,7 @@ ${f.notes}`);
     .filter((r) => ['SUBMITTED', 'ACCEPTED', 'COUNTER_REFERRED'].includes(r.status))
     .slice(0, 1)
     .forEach((r) => {
+      const statusKey = r.status === 'SUBMITTED' ? 'status.submitted' : r.status === 'ACCEPTED' ? 'status.accepted' : 'status.counter_referred';
       careActions.push({
         id: `ref-${r.id}`,
         type: 'referral',
@@ -598,11 +625,15 @@ ${f.notes}`);
         title: `Referral: ${r.destinationFacility?.name || 'District Hospital'}`,
         subtitle: r.reason ? `Reason: ${r.reason}` : 'Specialist evaluation arranged',
         actionLabel: 'Track Referral',
+        title: `${t('referral.title', 'Referral')}: ${r.destinationFacility?.name || 'District Hospital'}`,
+        subtitle: r.reason ? `${t('referral.reason', 'Reason')}: ${r.reason}` : t('referral.specialist_arranged', 'Specialist evaluation arranged'),
+        actionLabel: t('action.track_referral', 'Track Referral'),
         onAction: () => {
           setSelectedReferral(r);
           setIsReferralDetailsOpen(true);
         },
         badge: { label: r.status.replace(/_/g, ' '), color: 'bg-blue-50 text-blue-700 border-blue-200' },
+        badge: { label: t(statusKey, r.status.replace(/_/g, ' ')), color: 'bg-blue-50 text-blue-700 border-blue-200' },
       });
     });
 
@@ -613,31 +644,71 @@ ${f.notes}`);
   const currentFacilityDoctors = selectedFacilityObj?.doctors || [];
 
   return (
-    <PageShell
-      title={`Namaste, ${patientName}`}
-      eyebrow="AyuSync · Patient Care Control Center"
-      subtitle={`ABHA: ${abhaId} · Village: ${village} · Phone: ${phone}`}
-      action={
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => fetchDashboardData(true)}
-            disabled={refreshing}
-            aria-label="Refresh health data"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 cursor-pointer"
-          >
-            <RefreshCw size={13} className={refreshing ? 'animate-spin text-[#1e6641]' : ''} />
-            <span className="hidden sm:inline">Sync</span>
-          </button>
-          <button
-            onClick={openBookingModal}
-            className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-[#1e6641] hover:bg-[#165032] text-white text-xs font-bold transition-all shadow-sm cursor-pointer"
-          >
-            <Plus size={14} />
-            Book Consultation
-          </button>
+    <PageShell>
+      {/* SECTION 0: COHESIVE PATIENT IDENTITY HEADER CARD */}
+      <div className="bg-white rounded-3xl border border-gray-200/80 shadow-xs p-5 sm:p-6 transition-all">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+          <div className="flex items-center gap-4">
+            <div className="w-13 h-13 rounded-2xl bg-gradient-to-br from-[#1e6641] to-[#257d50] text-white flex items-center justify-center font-extrabold text-lg shadow-xs shrink-0 ring-2 ring-[#1e6641]/20">
+              {patientInitials}
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <h1 className="text-xl sm:text-2xl font-black text-gray-900 tracking-tight">
+                  {t('greeting.namaste', 'Namaste')}, {patientName}
+                </h1>
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#e4efe7] text-[#1e6641] border border-[#1e6641]/20">
+                  {t('role.patient', 'Patient')}
+                </span>
+              </div>
+              <div className="flex items-center gap-x-3.5 gap-y-1.5 flex-wrap text-xs text-gray-600">
+                <span className="flex items-center gap-1 font-medium">
+                  <MapPin size={13} className="text-[#1e6641]" />
+                  <span className="text-gray-400 font-normal">{t('profile.village', 'Village')}:</span>
+                  <span className="font-semibold text-gray-800">{village}</span>
+                </span>
+                <span className="text-gray-300">·</span>
+                <span className="flex items-center gap-1 font-medium">
+                  <span className="text-gray-400 font-normal">{t('profile.abha', 'ABHA')}:</span>
+                  <span className="font-mono font-semibold text-gray-800 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200 text-[11px]">{abhaId}</span>
+                </span>
+                <span className="text-gray-300">·</span>
+                <span className="flex items-center gap-1 font-medium">
+                  <Phone size={12} className="text-gray-400" />
+                  <span className="text-gray-400 font-normal">{t('profile.phone', 'Phone')}:</span>
+                  <span className="font-semibold text-gray-800">{phone}</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap shrink-0">
+            <button
+              onClick={() => fetchDashboardData(true)}
+              disabled={refreshing}
+              aria-label="Refresh health data"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 cursor-pointer shadow-2xs"
+            >
+              <RefreshCw size={13} className={refreshing ? 'animate-spin text-[#1e6641]' : ''} />
+              <span>{t('action.sync', 'Sync')}</span>
+            </button>
+            <button
+              onClick={() => setIsNearbyCareOpen(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[#1e6641]/30 bg-[#e4efe7]/40 hover:bg-[#e4efe7] text-[#1e6641] text-xs font-bold transition-all shadow-2xs cursor-pointer"
+            >
+              <Compass size={14} />
+              <span>{t('action.find_nearby', 'Find Nearby Care')}</span>
+            </button>
+            <button
+              onClick={openBookingModal}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#1e6641] hover:bg-[#165032] text-white text-xs font-bold transition-all shadow-sm cursor-pointer"
+            >
+              <Plus size={14} />
+              <span>{t('action.book_consultation', 'Book Consultation')}</span>
+            </button>
+          </div>
         </div>
-      }
-    >
+      </div>
       {/* Toast Banners */}
       {actionSuccess && (
         <div className="p-3.5 rounded-2xl bg-[#e4efe7] border border-[#1e6641]/20 flex items-start gap-3 shadow-xs">
@@ -680,9 +751,11 @@ ${f.notes}`);
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white/20 text-white text-[11px] font-bold backdrop-blur-xs">
                     <Ticket size={13} />
                     Live Consultation Queue
+                    {t('queue.live_title', 'Live Consultation Queue')}
                   </div>
                   <div className="flex items-baseline gap-2">
                     <span className="text-xs text-white/80 uppercase tracking-wider font-semibold">Your Token:</span>
+                    <span className="text-xs text-white/80 uppercase tracking-wider font-semibold">{t('queue.token', 'Your Token')}:</span>
                     <span className="text-2xl sm:text-3xl font-extrabold tracking-tight underline decoration-white/40">
                       {queueInfo.entry.tokenNumber}
                     </span>
@@ -701,11 +774,13 @@ ${f.notes}`);
                   <div className="text-center px-2">
                     <div className="text-2xl sm:text-3xl font-extrabold">{queueInfo.position || 1}</div>
                     <div className="text-[10px] uppercase tracking-wider text-white/80 font-bold">Wait Position</div>
+                    <div className="text-[10px] uppercase tracking-wider text-white/80 font-bold">{t('queue.wait_position', 'Wait Position')}</div>
                   </div>
                   <div className="h-8 w-[1px] bg-white/20" />
                   <div className="text-center px-2">
                     <div className="text-2xl sm:text-3xl font-extrabold">~{queueInfo.estimatedWaitMinutes || 10}</div>
                     <div className="text-[10px] uppercase tracking-wider text-white/80 font-bold">Est. Mins</div>
+                    <div className="text-[10px] uppercase tracking-wider text-white/80 font-bold">{t('queue.est_wait', 'Est. Mins')}</div>
                   </div>
                   <div className="h-8 w-[1px] bg-white/20" />
                   <div className="text-center px-1">
@@ -721,6 +796,7 @@ ${f.notes}`);
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#1e6641] text-white text-[11px] font-bold">
                   <Clock size={12} />
                   Clinic Visit Scheduled Today
+                  {t('appointment.today_title', "Today's Clinic Appointment")}
                 </div>
                 <h2 className="text-lg font-bold text-gray-900">
                   {activeTodayAppt.doctor?.name || 'Dr. Rajesh Deshmukh'} · {activeTodayAppt.timeSlot}
@@ -736,6 +812,7 @@ ${f.notes}`);
               >
                 <CheckCircle2 size={16} />
                 Check In & Join Live Queue
+                {t('appointment.check_in', 'Check In & Join Live Queue')}
               </button>
             </div>
           ) : nextUpcomingAppt ? (
@@ -747,8 +824,10 @@ ${f.notes}`);
                 </div>
                 <div className="space-y-0.5">
                   <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Next Step</span>
+                  <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">{t('appointment.next_step', 'Next Step')}</span>
                   <h3 className="text-sm font-bold text-gray-900">
                     Next Consultation: {nextUpcomingAppt.doctor?.name || 'Dr. Rajesh Deshmukh'}
+                    {t('appointment.next_upcoming', 'Next Upcoming Consultation')}: {nextUpcomingAppt.doctor?.name || 'Dr. Rajesh Deshmukh'}
                   </h3>
                   <p className="text-xs text-gray-500">
                     {formatAppointmentDateTime(nextUpcomingAppt.scheduledAt, nextUpcomingAppt.date, nextUpcomingAppt.timeSlot).dateFormatted} at {nextUpcomingAppt.timeSlot} · {nextUpcomingAppt.facility?.name || 'Baramati CHC'}
@@ -761,12 +840,14 @@ ${f.notes}`);
                   className="px-3.5 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold transition-colors cursor-pointer"
                 >
                   View Details
+                  {t('action.view_details', 'View Details')}
                 </button>
                 <button
                   onClick={openBookingModal}
                   className="px-3.5 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-semibold transition-colors cursor-pointer"
                 >
                   New Booking
+                  {t('action.new_booking', 'New Booking')}
                 </button>
               </div>
             </div>
@@ -779,6 +860,7 @@ ${f.notes}`);
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-gray-900">No Pending Appointments</h3>
+                  <h3 className="text-sm font-bold text-gray-900">{t('appointment.no_pending', 'No Pending Appointments')}</h3>
                   <p className="text-xs text-gray-500">
                     Schedule a consultation with Dr. Rajesh Deshmukh at Baramati CHC or your local PHC.
                   </p>
@@ -789,6 +871,7 @@ ${f.notes}`);
                 className="px-4 py-2.5 rounded-2xl bg-[#1e6641] hover:bg-[#165032] text-white text-xs font-bold transition-all shadow-sm shrink-0 cursor-pointer"
               >
                 Schedule Clinic Visit
+                {t('appointment.schedule_visit', 'Schedule Clinic Visit')}
               </button>
             </div>
           )}
@@ -809,6 +892,7 @@ ${f.notes}`);
                       <Stethoscope size={16} className="text-[#1e6641]" />
                       <h2 className="text-xs font-bold uppercase tracking-wider text-gray-800">
                         {activeTodayAppt ? "Today's Clinic Appointment" : 'Next Upcoming Consultation'}
+                        {activeTodayAppt ? t('appointment.today_title', "Today's Clinic Appointment") : t('appointment.next_upcoming', 'Next Upcoming Consultation')}
                       </h2>
                     </div>
                     <button
@@ -816,6 +900,8 @@ ${f.notes}`);
                       className="text-xs font-semibold text-[#1e6641] hover:underline flex items-center gap-1 cursor-pointer"
                     >
                       All Appointments ({appointments.length}) <ChevronRight size={13} />
+                      {t('appointment.all_appointments', 'All Appointments')} ({appointments.length}) <ChevronRight size={13} />
+                      {t('patient.all_appointments', { count: appointments.length }, `All Appointments (${appointments.length})`)} <ChevronRight size={13} />
                     </button>
                   </div>
 
@@ -860,6 +946,7 @@ ${f.notes}`);
                               className="px-3.5 py-2 rounded-xl bg-[#1e6641] hover:bg-[#165032] text-white text-xs font-bold transition-all shadow-sm cursor-pointer"
                             >
                               Check In
+                              {t('action.check_in', 'Check In')}
                             </button>
                           )}
                           {spotlight.status === 'SCHEDULED' && (
@@ -868,6 +955,7 @@ ${f.notes}`);
                               className="px-3 py-2 rounded-xl border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 text-xs font-semibold transition-colors cursor-pointer"
                             >
                               Cancel
+                              {t('action.cancel', 'Cancel')}
                             </button>
                           )}
                         </div>
@@ -884,10 +972,13 @@ ${f.notes}`);
                     <AlertTriangle size={16} className="text-amber-600" />
                     <h2 className="text-xs font-bold uppercase tracking-wider text-gray-800">
                       Care Actions & Follow-Ups
+                      {t('care.actions_title', 'Care Actions & Follow-Ups')}
                     </h2>
                   </div>
                   <span className="text-xs font-semibold text-gray-500">
                     {careActions.length} Pending
+                    {careActions.length} {t('care.pending_count', 'Pending')}
+                    {t('care.pending_count', { count: careActions.length }, `${careActions.length} Pending`)}
                   </span>
                 </div>
 
@@ -896,6 +987,7 @@ ${f.notes}`);
                     <div className="p-6 text-center text-xs text-gray-500 flex items-center justify-center gap-2">
                       <CheckCircle2 size={16} className="text-[#1e6641]" />
                       <span>All care follow-ups, diagnostic tests, and referral actions are up to date.</span>
+                      <span>{t('care.all_clear', 'All care follow-ups, diagnostic tests, and referral actions are up to date.')}</span>
                     </div>
                   ) : (
                     careActions.map((action) => {
@@ -945,6 +1037,7 @@ ${f.notes}`);
                       <Building2 size={16} className="text-[#1e6641]" />
                       <h3 className="text-xs font-bold uppercase tracking-wider text-gray-800">
                         Active Hospital Referral
+                        {t('referral.active_title', 'Active Hospital Referral')}
                       </h3>
                     </div>
                     <StatusBadge status={activeReferral.status} size="sm" />
@@ -959,6 +1052,8 @@ ${f.notes}`);
                       <p className="text-xs text-gray-500">
                         {activeReferral.reason || 'Specialized clinical evaluation'} · Priority:{' '}
                         <span className="font-semibold text-amber-700">{activeReferral.urgency}</span>
+                        {activeReferral.reason || 'Specialized clinical evaluation'} · {t('referral.priority', 'Priority')}:{' '}
+                        <span className="font-semibold text-amber-700">{t(`status.${activeReferral.urgency.toLowerCase()}`, activeReferral.urgency)}</span>
                       </p>
                     </div>
                     <button
@@ -969,6 +1064,7 @@ ${f.notes}`);
                       className="px-3 py-1.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold shrink-0 cursor-pointer"
                     >
                       Track Referral
+                      {t('referral.track', 'Track Referral')}
                     </button>
                   </div>
                 </div>
@@ -977,6 +1073,7 @@ ${f.notes}`);
                   <span className="flex items-center gap-2">
                     <Building2 size={15} className="text-gray-400" />
                     No active hospital referrals · All primary care managed locally
+                    {t('referral.none_active', 'No active hospital referrals · All primary care managed locally')}
                   </span>
                   {referrals.length > 0 && (
                     <button
@@ -987,6 +1084,7 @@ ${f.notes}`);
                       className="text-[#1e6641] font-semibold hover:underline cursor-pointer"
                     >
                       Past Referrals ({referrals.length})
+                      {t('referral.past_referrals', 'Past Referrals')} ({referrals.length})
                     </button>
                   )}
                 </div>
@@ -999,6 +1097,7 @@ ${f.notes}`);
                     <Activity size={16} className="text-[#1e6641]" />
                     <h3 className="text-xs font-bold uppercase tracking-wider text-gray-800">
                       Recent Care Milestones
+                      {t('care.recent_milestones', 'Recent Care Milestones')}
                     </h3>
                   </div>
                   <Link
@@ -1006,24 +1105,30 @@ ${f.notes}`);
                     className="text-xs font-semibold text-[#1e6641] hover:underline flex items-center gap-1"
                   >
                     Complete Health Record <ArrowRight size={13} />
+                    {t('care.complete_record', 'Complete Health Record')} <ArrowRight size={13} />
                   </Link>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
                   <div className="p-3 rounded-2xl bg-gray-50 border border-gray-100 text-xs space-y-1">
                     <span className="text-[10px] font-bold uppercase text-gray-400">Clinical Consultation</span>
+                    <span className="text-[10px] font-bold uppercase text-gray-400">{t('milestone.consultation', 'Clinical Consultation')}</span>
                     <div className="font-bold text-gray-900">Dr. Rajesh Deshmukh</div>
                     <p className="text-[11px] text-gray-500">Baramati Sub-District CHC</p>
                   </div>
                   <div className="p-3 rounded-2xl bg-gray-50 border border-gray-100 text-xs space-y-1">
                     <span className="text-[10px] font-bold uppercase text-gray-400">Diagnostics Ordered</span>
+                    <span className="text-[10px] font-bold uppercase text-gray-400">{t('milestone.diagnostics', 'Diagnostics Ordered')}</span>
                     <div className="font-bold text-gray-900">HbA1c & Creatinine</div>
                     <p className="text-[11px] text-gray-500">Pathology telemetry active</p>
+                    <p className="text-[11px] text-gray-500">{t('milestone.pathology_telemetry', 'Pathology telemetry active')}</p>
                   </div>
                   <div className="p-3 rounded-2xl bg-gray-50 border border-gray-100 text-xs space-y-1">
                     <span className="text-[10px] font-bold uppercase text-gray-400">Medications</span>
+                    <span className="text-[10px] font-bold uppercase text-gray-400">{t('milestone.medications', 'Medications')}</span>
                     <div className="font-bold text-gray-900">Amlodipine & Metformin</div>
                     <p className="text-[11px] text-gray-500">Active chronic regimen</p>
+                    <p className="text-[11px] text-gray-500">{t('milestone.active_chronic_regimen', 'Active chronic regimen')}</p>
                   </div>
                 </div>
               </div>
@@ -1040,6 +1145,7 @@ ${f.notes}`);
                     <Activity size={16} className="text-[#1e6641]" />
                     <h3 className="text-xs font-bold uppercase tracking-wider text-gray-800">
                       Health Snapshot
+                      {t('vitals.title', 'Health Snapshot')}
                     </h3>
                   </div>
                   <span className="text-[11px] text-gray-400">
@@ -1056,6 +1162,7 @@ ${f.notes}`);
                   {/* BP */}
                   <div className="p-3 rounded-2xl bg-[#f7faf8] border border-[#1e6641]/15">
                     <div className="text-[10px] uppercase font-bold text-gray-400">BP</div>
+                    <div className="text-[10px] uppercase font-bold text-gray-400">{t('vitals.bp', 'BP')}</div>
                     <div className="text-base font-extrabold text-gray-900 mt-0.5">
                       {summary?.recentVitals?.bp ||
                         (summary?.recentVitals?.systolic && summary?.recentVitals?.diastolic
@@ -1068,6 +1175,7 @@ ${f.notes}`);
                   {/* Heart Rate */}
                   <div className="p-3 rounded-2xl bg-[#f7faf8] border border-[#1e6641]/15">
                     <div className="text-[10px] uppercase font-bold text-gray-400">Pulse</div>
+                    <div className="text-[10px] uppercase font-bold text-gray-400">{t('vitals.pulse', 'Pulse')}</div>
                     <div className="text-base font-extrabold text-gray-900 mt-0.5">
                       {summary?.recentVitals?.heartRate || '74'}
                       <span className="text-[10px] font-normal text-gray-500 ml-0.5">bpm</span>
@@ -1077,6 +1185,7 @@ ${f.notes}`);
                   {/* Blood Glucose */}
                   <div className="p-3 rounded-2xl bg-[#f7faf8] border border-[#1e6641]/15">
                     <div className="text-[10px] uppercase font-bold text-gray-400">Glucose</div>
+                    <div className="text-[10px] uppercase font-bold text-gray-400">{t('vitals.glucose', 'Glucose')}</div>
                     <div className="text-base font-extrabold text-gray-900 mt-0.5">
                       {summary?.recentVitals?.bloodGlucose || '186'}
                       <span className="text-[10px] font-normal text-gray-500 ml-0.5">mg/dL</span>
@@ -1086,6 +1195,7 @@ ${f.notes}`);
                   {/* SpO2 */}
                   <div className="p-3 rounded-2xl bg-[#f7faf8] border border-[#1e6641]/15">
                     <div className="text-[10px] uppercase font-bold text-gray-400">SpO2</div>
+                    <div className="text-[10px] uppercase font-bold text-gray-400">{t('vitals.spo2', 'SpO2')}</div>
                     <div className="text-base font-extrabold text-gray-900 mt-0.5">
                       {summary?.recentVitals?.spo2 || '98'}%
                     </div>
@@ -1097,6 +1207,7 @@ ${f.notes}`);
                   className="text-xs font-semibold text-[#1e6641] hover:underline flex items-center justify-between pt-1"
                 >
                   <span>View full vitals history</span>
+                  <span>{t('vitals.view_full', 'View full vitals history')}</span>
                   <ChevronRight size={13} />
                 </Link>
               </div>
@@ -1108,16 +1219,19 @@ ${f.notes}`);
                     <Pill size={16} className="text-[#1e6641]" />
                     <h3 className="text-xs font-bold uppercase tracking-wider text-gray-800">
                       Active Medications
+                      {t('meds.title', 'Active Medications')}
                     </h3>
                   </div>
                   <span className="text-xs font-semibold text-gray-500">
                     {prescriptions.length} Active
+                    {prescriptions.length} {t('meds.active_count', 'Active')}
+                    {t('meds.active_count', { count: prescriptions.length }, `${prescriptions.length} Active`)}
                   </span>
                 </div>
 
                 <div className="space-y-2">
                   {prescriptions.length === 0 ? (
-                    <p className="text-xs text-gray-400 py-2">No active prescriptions</p>
+                    <p className="text-xs text-gray-400 py-2">{t('meds.no_active', 'No active prescriptions')}</p>
                   ) : (
                     prescriptions.slice(0, 3).map((rx) => (
                       <div
@@ -1138,12 +1252,35 @@ ${f.notes}`);
                   )}
                 </div>
 
+                {/* Honest Medicine Stock UX: Disclose multi-facility live stock unavailability + nearby care CTA */}
+                <div className="p-3 rounded-2xl bg-amber-50/70 border border-amber-200/60 text-amber-900 text-xs space-y-1.5">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={15} className="text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-semibold">{t('meds.stock_disclaimer_title', 'Dispensary Stock Notice')}:</span>{' '}
+                      <span className="text-amber-800 text-[11px] leading-relaxed">
+                        {t(
+                          'meds.stock_disclaimer',
+                          'Live multi-facility stock counts are not tracked. Contact dispensary or find nearby centers with pharmacy capabilities.'
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsNearbyCareOpen(true)}
+                    className="w-full mt-1 px-2.5 py-1.5 rounded-xl bg-white border border-amber-300 text-amber-800 font-semibold text-[11px] hover:bg-amber-100/50 transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <Compass size={12} className="text-amber-700" />
+                    <span>{t('action.find_nearby', 'Find Nearby Care')}</span>
+                  </button>
+                </div>
+
                 {prescriptions.length > 0 && (
                   <button
                     onClick={() => setIsAllPrescriptionsOpen(true)}
                     className="w-full text-xs font-semibold text-[#1e6641] hover:underline flex items-center justify-between pt-1 cursor-pointer"
                   >
-                    <span>View all medications & instructions</span>
+                    <span>{t('meds.view_all', 'View all medications & instructions')}</span>
                     <ChevronRight size={13} />
                   </button>
                 )}
@@ -1155,20 +1292,21 @@ ${f.notes}`);
                   <div className="flex items-center gap-2">
                     <FlaskConical size={16} className="text-[#1e6641]" />
                     <h3 className="text-xs font-bold uppercase tracking-wider text-gray-800">
-                      Diagnostics Focus
+                      {t('diagnostics.title', 'Diagnostics Focus')}
                     </h3>
                   </div>
                   <button
                     onClick={() => setIsAllDiagnosticsOpen(true)}
                     className="text-xs font-semibold text-[#1e6641] hover:underline cursor-pointer"
                   >
-                    All Reports ({diagnostics.length})
+                    {t('diagnostics.all_reports', 'All Reports')} ({diagnostics.length})
+                    {t('diagnostics.all_reports', { count: diagnostics.length }, `All Reports (${diagnostics.length})`)}
                   </button>
                 </div>
 
                 <div className="space-y-2">
                   {diagnostics.length === 0 ? (
-                    <p className="text-xs text-gray-400 py-2">No laboratory tests recorded</p>
+                    <p className="text-xs text-gray-400 py-2">{t('diagnostics.no_records', 'No laboratory tests recorded')}</p>
                   ) : (
                     diagnostics.slice(0, 3).map((diag) => {
                       const isPending = diag.status === 'PENDING';
@@ -1184,9 +1322,12 @@ ${f.notes}`);
                             <p className="text-[11px] text-gray-500">
                               {isPending
                                 ? 'Sample in analysis'
+                                ? t('care.sample_processing', 'Sample under processing · Results pending')
                                 : abnormal
                                 ? `Value: ${abnormal.resultValue}`
                                 : 'Completed · Normal range'}
+                                ? `${t('care.result', 'Result')}: ${abnormal.resultValue}`
+                                : t('diagnostics.normal_complete', 'Completed · Normal range')}
                             </p>
                           </div>
                           <span
@@ -1199,6 +1340,7 @@ ${f.notes}`);
                             }`}
                           >
                             {isPending ? 'Pending' : abnormal ? 'Abnormal' : 'Normal'}
+                            {isPending ? t('status.pending', 'Pending') : abnormal ? t('status.abnormal', 'Abnormal') : t('status.normal', 'Normal')}
                           </span>
                         </div>
                       );
@@ -1212,21 +1354,27 @@ ${f.notes}`);
                 <div className="flex items-center gap-1.5 font-bold text-gray-800">
                   <Phone size={14} className="text-red-600" />
                   <span>Rural Emergency Helplines</span>
+                  <span>{t('helpline.title', 'Rural Emergency Helplines')}</span>
                 </div>
                 <div className="flex items-center justify-between text-gray-600 pt-0.5">
                   <span>Ambulance (Toll-free):</span>
+                  <span>{t('helpline.ambulance', 'Ambulance (Toll-free)')}:</span>
                   <a href="tel:108" className="font-bold text-[#1e6641] hover:underline">
                     Dial 108
+                    {t('helpline.dial_108', 'Dial 108')}
                   </a>
                 </div>
                 <div className="flex items-center justify-between text-gray-600">
                   <span>Health Helpline:</span>
+                  <span>{t('helpline.health', 'Health Helpline')}:</span>
                   <a href="tel:104" className="font-bold text-[#1e6641] hover:underline">
                     Dial 104
+                    {t('helpline.dial_104', 'Dial 104')}
                   </a>
                 </div>
                 <div className="flex items-center justify-between text-gray-600">
                   <span>Baramati CHC Desk:</span>
+                  <span>{t('helpline.desk', 'Baramati CHC Desk')}:</span>
                   <span className="font-medium text-gray-800">+91 2112 222 345</span>
                 </div>
               </div>
@@ -1247,6 +1395,8 @@ ${f.notes}`);
                 <div>
                   <h3 className="text-base font-bold text-gray-900">Your Consultations & History</h3>
                   <p className="text-xs text-gray-500">Scheduled visits, active queues, and historical visits</p>
+                  <h3 className="text-base font-bold text-gray-900">{t('modal.appointments_title', 'Your Consultations & History')}</h3>
+                  <p className="text-xs text-gray-500">{t('modal.appointments_sub', 'Scheduled visits, active queues, and historical visits')}</p>
                 </div>
               </div>
               <button
@@ -1268,6 +1418,7 @@ ${f.notes}`);
                 }`}
               >
                 Upcoming & Active ({upcomingList.length})
+                {t('tab.upcoming_active', { count: upcomingList.length }, `Upcoming & Active (${upcomingList.length})`)}
               </button>
               <button
                 onClick={() => setAppointmentsTab('past')}
@@ -1278,6 +1429,7 @@ ${f.notes}`);
                 }`}
               >
                 Past Medical Consultations ({pastList.length})
+                {t('tab.past_consultations', { count: pastList.length }, `Past Medical Consultations (${pastList.length})`)}
               </button>
             </div>
 
@@ -1285,6 +1437,7 @@ ${f.notes}`);
               {(appointmentsTab === 'upcoming' ? upcomingList : pastList).length === 0 ? (
                 <p className="text-xs text-gray-400 text-center py-6">
                   {appointmentsTab === 'upcoming' ? 'No upcoming appointments.' : 'No past consultation history.'}
+                  {appointmentsTab === 'upcoming' ? t('appointment.no_upcoming', 'No upcoming appointments.') : t('appointment.no_past', 'No past consultation history.')}
                 </p>
               ) : (
                 (appointmentsTab === 'upcoming' ? upcomingList : pastList).map((appt) => {
@@ -1310,6 +1463,7 @@ ${f.notes}`);
                           {appt.queueEntry?.tokenNumber && (
                             <span className="px-2 py-0.5 rounded bg-[#e4efe7] text-[#1e6641] text-xs font-bold">
                               Token: {appt.queueEntry.tokenNumber}
+                              {t('queue.token', 'Token')}: {appt.queueEntry.tokenNumber}
                             </span>
                           )}
                         </div>
@@ -1334,6 +1488,7 @@ ${f.notes}`);
                               className="px-3 py-1.5 rounded-xl bg-[#1e6641] hover:bg-[#165032] text-white text-xs font-bold cursor-pointer"
                             >
                               Check In
+                              {t('action.check_in', 'Check In')}
                             </button>
                           )}
                           <button
@@ -1341,6 +1496,7 @@ ${f.notes}`);
                             className="px-2.5 py-1.5 rounded-xl border border-gray-200 text-gray-500 hover:text-red-600 text-xs font-medium cursor-pointer"
                           >
                             Cancel
+                            {t('action.cancel', 'Cancel')}
                           </button>
                         </div>
                       )}
@@ -1356,6 +1512,7 @@ ${f.notes}`);
                 className="px-4 py-1.5 rounded-xl border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-100 cursor-pointer"
               >
                 Close
+                {t('action.close', 'Close')}
               </button>
             </div>
           </div>
@@ -1374,6 +1531,8 @@ ${f.notes}`);
                 <div>
                   <h3 className="text-base font-bold text-gray-900">Medications & Prescriptions</h3>
                   <p className="text-xs text-gray-500">Active medical orders prescribed by your doctors</p>
+                  <h3 className="text-base font-bold text-gray-900">{t('modal.prescriptions_title', 'Medications & Prescriptions')}</h3>
+                  <p className="text-xs text-gray-500">{t('modal.prescriptions_sub', 'Active medical orders prescribed by your doctors')}</p>
                 </div>
               </div>
               <button
@@ -1387,6 +1546,7 @@ ${f.notes}`);
             <div className="p-6 overflow-y-auto space-y-3 divide-y divide-gray-100">
               {prescriptions.length === 0 ? (
                 <p className="text-xs text-gray-400 text-center py-6">No active prescriptions.</p>
+                <p className="text-xs text-gray-400 text-center py-6">{t('meds.no_active', 'No active prescriptions.')}</p>
               ) : (
                 prescriptions.map((rx) => (
                   <div key={rx.id} className="pt-3 first:pt-0 space-y-1 text-xs">
@@ -1400,11 +1560,13 @@ ${f.notes}`);
                     </div>
                     <p className="text-gray-600">
                       Frequency: <span className="font-semibold text-gray-800">{rx.frequency}</span> · Duration:{' '}
+                      {t('meds.frequency', 'Frequency')}: <span className="font-semibold text-gray-800">{rx.frequency}</span> · {t('meds.duration', 'Duration')}:{' '}
                       <span className="font-semibold text-gray-800">{rx.duration}</span>
                     </p>
                     {rx.instructions && (
                       <p className="text-[11px] text-gray-500 italic bg-gray-50 p-2 rounded-xl">
                         Instructions: {rx.instructions}
+                        {t('meds.instructions', 'Instructions')}: {rx.instructions}
                       </p>
                     )}
                   </div>
@@ -1418,6 +1580,7 @@ ${f.notes}`);
                 className="px-4 py-1.5 rounded-xl border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-100 cursor-pointer"
               >
                 Close
+                {t('action.close', 'Close')}
               </button>
             </div>
           </div>
@@ -1436,6 +1599,8 @@ ${f.notes}`);
                 <div>
                   <h3 className="text-base font-bold text-gray-900">Laboratory Diagnostics & Pathology</h3>
                   <p className="text-xs text-gray-500">Blood tests, telemetry, and clinical laboratory orders</p>
+                  <h3 className="text-base font-bold text-gray-900">{t('modal.diagnostics_title', 'Laboratory Diagnostics & Pathology')}</h3>
+                  <p className="text-xs text-gray-500">{t('modal.diagnostics_sub', 'Blood tests, telemetry, and clinical laboratory orders')}</p>
                 </div>
               </div>
               <button
@@ -1449,6 +1614,7 @@ ${f.notes}`);
             <div className="p-6 overflow-y-auto space-y-3 divide-y divide-gray-100">
               {diagnostics.length === 0 ? (
                 <p className="text-xs text-gray-400 text-center py-6">No laboratory orders recorded.</p>
+                <p className="text-xs text-gray-400 text-center py-6">{t('diagnostics.no_records', 'No laboratory orders recorded.')}</p>
               ) : (
                 diagnostics.map((diag) => (
                   <div key={diag.id} className="pt-3 first:pt-0 space-y-1.5 text-xs">
@@ -1468,14 +1634,17 @@ ${f.notes}`);
                             }`}
                           >
                             <span className="font-semibold">Result Value: {res.resultValue}</span>
+                            <span className="font-semibold">{t('care.result', 'Result Value')}: {res.resultValue}</span>
                             <span className="font-bold text-[10px] uppercase">
                               {res.isAbnormal ? 'Abnormal Range' : 'Normal'}
+                              {res.isAbnormal ? t('status.abnormal', 'Abnormal Range') : t('status.normal', 'Normal')}
                             </span>
                           </div>
                         ))}
                       </div>
                     ) : (
                       <p className="text-[11px] text-gray-400 italic">Sample collection complete · Processing report</p>
+                      <p className="text-[11px] text-gray-400 italic">{t('diagnostics.sample_processing', 'Sample collection complete · Processing report')}</p>
                     )}
                   </div>
                 ))
@@ -1488,6 +1657,7 @@ ${f.notes}`);
                 className="px-4 py-1.5 rounded-xl border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-100 cursor-pointer"
               >
                 Close
+                {t('action.close', 'Close')}
               </button>
             </div>
           </div>
@@ -1506,6 +1676,8 @@ ${f.notes}`);
                 <div>
                   <h3 className="text-base font-bold text-gray-900">Hospital Referral Details</h3>
                   <p className="text-xs text-gray-500">Care continuity and inter-facility transfer</p>
+                  <h3 className="text-base font-bold text-gray-900">{t('modal.referral_title', 'Hospital Referral Details')}</h3>
+                  <p className="text-xs text-gray-500">{t('modal.referral_sub', 'Care continuity and inter-facility transfer')}</p>
                 </div>
               </div>
               <button
@@ -1519,17 +1691,21 @@ ${f.notes}`);
             <div className="p-6 overflow-y-auto space-y-4 text-xs">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-gray-500 uppercase">Transfer Status</span>
+                <span className="font-bold text-gray-500 uppercase">{t('referral.transfer_status', 'Transfer Status')}</span>
                 <StatusBadge status={selectedReferral.status} size="sm" />
               </div>
 
               <div className="p-3.5 rounded-2xl bg-gray-50 border border-gray-100 space-y-1.5">
                 <div className="text-gray-500 font-medium">Facilities</div>
+                <div className="text-gray-500 font-medium">{t('referral.facilities', 'Facilities')}</div>
                 <div className="font-bold text-gray-900 text-sm">
                   {selectedReferral.originFacility?.name || 'Baramati CHC'} →{' '}
                   {selectedReferral.destinationFacility?.name || 'Aundh District Hospital'}
                 </div>
                 <p className="text-gray-600">Clinical Reason: {selectedReferral.reason}</p>
                 <p className="text-gray-500">Urgency: {selectedReferral.urgency}</p>
+                <p className="text-gray-600">{t('referral.clinical_reason', 'Clinical Reason')}: {selectedReferral.reason}</p>
+                <p className="text-gray-500">{t('referral.priority', 'Urgency')}: <span className="font-semibold text-amber-700">{t(`status.${selectedReferral.urgency.toLowerCase()}`, selectedReferral.urgency)}</span></p>
               </div>
 
               {selectedReferral.counterReferral && (
@@ -1537,6 +1713,7 @@ ${f.notes}`);
                   <div className="font-bold text-blue-900 flex items-center gap-1.5">
                     <CheckCircle2 size={14} className="text-blue-600" />
                     Doctor Discharge & Counter-Referral Advice
+                    {t('referral.discharge_advice', 'Doctor Discharge & Counter-Referral Advice')}
                   </div>
                   <p className="text-gray-700">
                     {selectedReferral.counterReferral.dischargeSummary || selectedReferral.counterReferral.advice}
@@ -1554,6 +1731,7 @@ ${f.notes}`);
                 className="px-4 py-1.5 rounded-xl border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-100 cursor-pointer"
               >
                 Close
+                {t('action.close', 'Close')}
               </button>
             </div>
           </div>
@@ -1574,6 +1752,8 @@ ${f.notes}`);
                 <div>
                   <h3 className="text-base font-bold text-gray-900">Book Doctor Consultation</h3>
                   <p className="text-xs text-gray-500">Pick clinic, doctor, and live available slot</p>
+                  <h3 className="text-base font-bold text-gray-900">{t('modal.booking_title', 'Book Doctor Consultation')}</h3>
+                  <p className="text-xs text-gray-500">{t('modal.booking_sub', 'Pick clinic, doctor, and live available slot')}</p>
                 </div>
               </div>
               <button
@@ -1591,6 +1771,7 @@ ${f.notes}`);
               <div>
                 <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                   Healthcare Facility *
+                  {t('booking.facility', 'Healthcare Facility')} *
                 </label>
                 <select
                   value={bookingFacilityId}
@@ -1610,6 +1791,7 @@ ${f.notes}`);
               <div>
                 <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                   Consulting Doctor *
+                  {t('booking.doctor', 'Consulting Doctor')} *
                 </label>
                 <select
                   value={bookingDoctorId}
@@ -1635,6 +1817,7 @@ ${f.notes}`);
               <div>
                 <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                   Appointment Date *
+                  {t('booking.date', 'Appointment Date')} *
                 </label>
                 <input
                   type="date"
@@ -1651,10 +1834,12 @@ ${f.notes}`);
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider">
                     Available Time Slots *
+                    {t('booking.slots', 'Available Time Slots')} *
                   </label>
                   {loadingSlots && (
                     <span className="text-[11px] text-gray-400 flex items-center gap-1">
                       <RefreshCw size={11} className="animate-spin" /> Checking slots...
+                      <RefreshCw size={11} className="animate-spin" /> {t('booking.checking_slots', 'Checking slots...')}
                     </span>
                   )}
                 </div>
@@ -1693,12 +1878,14 @@ ${f.notes}`);
               <div>
                 <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                   Reason for Consultation
+                  {t('booking.reason', 'Reason for Consultation')}
                 </label>
                 <input
                   type="text"
                   value={bookingReason}
                   onChange={(e) => setBookingReason(e.target.value)}
                   placeholder="e.g. Routine blood pressure checkup, Glycemic review"
+                  placeholder={t('booking.reason_placeholder', 'e.g. Routine blood pressure checkup, Glycemic review')}
                   className="w-full rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#1e6641]/20 focus:border-[#1e6641]"
                 />
               </div>
@@ -1710,20 +1897,27 @@ ${f.notes}`);
                   onClick={() => setIsBookingOpen(false)}
                   className="px-4 py-2 rounded-xl border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 cursor-pointer"
                 >
-                  Cancel
+                  {t('action.cancel', 'Cancel')}
                 </button>
                 <button
                   type="submit"
                   disabled={bookingSubmitting}
                   className="px-5 py-2 rounded-xl bg-[#1e6641] hover:bg-[#165032] text-white text-xs font-bold transition-colors disabled:opacity-50 shadow-sm cursor-pointer"
                 >
-                  {bookingSubmitting ? 'Booking...' : 'Confirm Appointment'}
+                  {bookingSubmitting ? 'Booking...' : t('action.book_consultation', 'Confirm Appointment')}
+                  {bookingSubmitting ? t('booking.in_progress', 'Booking...') : t('booking.confirm', 'Confirm Appointment')}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
+
+      {/* Nearby Care Discovery Modal */}
+      <FindNearbyCareModal
+        isOpen={isNearbyCareOpen}
+        onClose={() => setIsNearbyCareOpen(false)}
+      />
     </PageShell>
   );
 }

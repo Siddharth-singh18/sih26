@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { prisma } from '../../index';
 import { formatDoctorName } from '../patients/patient.controller';
 import { AuthRequest } from '../../middleware/auth';
+import { calculateOptimalRoutes, ROUTING_WEIGHTS, RouteRequest } from '../routing/routing.service';
+import { broadcastFacilityAvailability, broadcastFacilityCapacity } from '../../events/socket';
 
 let cachedFacilities: any = null;
 let facilitiesCacheTimestamp = 0;
@@ -102,7 +104,6 @@ export const getFacilities = async (req: Request, res: Response) => {
   }
 };
 
-export const updateFacilityAvailability = async (req: Request, res: Response) => {
 export const updateFacilityAvailability = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -141,10 +142,6 @@ export const updateFacilityAvailability = async (req: AuthRequest, res: Response
       cleanScore = scoreNum;
     }
 
-    const availability = await prisma.facilityAvailability.upsert({
-      where: { facilityId: id },
-      update: { status: cleanStatus, readinessScore: cleanScore },
-      create: { facilityId: id, status: cleanStatus, readinessScore: cleanScore ?? 80 }
     const availability = await prisma.$transaction(async (tx) => {
       const avail = await tx.facilityAvailability.upsert({
         where: { facilityId: id },
@@ -165,6 +162,14 @@ export const updateFacilityAvailability = async (req: AuthRequest, res: Response
     });
 
     cachedFacilities = null;
+
+    // Part B & F: Emit realtime event only after successful DB transaction
+    broadcastFacilityAvailability(id, {
+      status: availability.status,
+      readinessScore: availability.readinessScore,
+      updatedAt: availability.updatedAt,
+      entityId: availability.id
+    });
 
     res.json(availability);
   } catch (error) {
@@ -287,9 +292,151 @@ export const updateFacilityCapacity = async (req: AuthRequest, res: Response) =>
 
     cachedFacilities = null;
 
+    // Part B & E: Emit realtime event only after successful DB transaction
+    broadcastFacilityCapacity(id, {
+      capacityId: updated.id,
+      category: updated.resource,
+      total: updated.total,
+      occupied: updated.occupied,
+      available: updated.total - updated.occupied,
+      updatedAt: updated.updatedAt
+    });
+
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 };
+
+/**
+ * Phase 3: Capability-Aware Facility Routing
+ * Evaluates real live PostgreSQL facility models, live queue entries,
+ * services, capacities, availability, and doctor/specialist presence.
+ */
+export const getFacilityRouting = async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      urgency,
+      requiredSpecialty,
+      specialty,
+      requiredService,
+      requiredBedType,
+      patientLocation,
+      excludeFacilityIds,
+      maxDistanceKm,
+      limit
+    } = req.body || {};
+
+    // Input Validation
+    const validUrgencies = ['ROUTINE', 'PRIORITY', 'URGENT', 'EMERGENCY'];
+    if (urgency && !validUrgencies.includes(String(urgency).toUpperCase())) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Invalid urgency level. Must be one of: ${validUrgencies.join(', ')}`
+      });
+    }
+
+    const validBedTypes = ['GENERAL', 'ICU', 'OXYGEN', 'MATERNITY', 'NICU'];
+    if (requiredBedType && !validBedTypes.includes(String(requiredBedType).toUpperCase())) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Invalid bed type. Must be one of: ${validBedTypes.join(', ')}`
+      });
+    }
+
+    const rootLat = req.body?.latitude ?? req.body?.lat;
+    const rootLon = req.body?.longitude ?? req.body?.lng ?? req.body?.lon;
+    if (rootLat !== undefined && (typeof rootLat !== 'number' || isNaN(rootLat) || rootLat < -90 || rootLat > 90)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Invalid latitude. Must be between -90 and 90'
+      });
+    }
+    if (rootLon !== undefined && (typeof rootLon !== 'number' || isNaN(rootLon) || rootLon < -180 || rootLon > 180)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Invalid longitude. Must be between -180 and 180'
+      });
+    }
+
+    if (patientLocation !== undefined && patientLocation !== null) {
+      if (typeof patientLocation !== 'object') {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'patientLocation must be an object with latitude and longitude'
+        });
+      }
+      const lat = patientLocation.latitude ?? patientLocation.lat;
+      const lon = patientLocation.longitude ?? patientLocation.lng ?? patientLocation.lon;
+      if (lat !== undefined && (typeof lat !== 'number' || isNaN(lat) || lat < -90 || lat > 90)) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Invalid latitude in patientLocation. Must be between -90 and 90'
+        });
+      }
+      if (lon !== undefined && (typeof lon !== 'number' || isNaN(lon) || lon < -180 || lon > 180)) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Invalid longitude in patientLocation. Must be between -180 and 180'
+        });
+      }
+    }
+
+    if (excludeFacilityIds !== undefined && !Array.isArray(excludeFacilityIds)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'excludeFacilityIds must be an array of facility IDs'
+      });
+    }
+
+    if (maxDistanceKm !== undefined && (typeof maxDistanceKm !== 'number' || isNaN(maxDistanceKm) || maxDistanceKm <= 0)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'maxDistanceKm must be a positive number'
+      });
+    }
+
+    if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'limit must be a positive integer'
+      });
+    }
+
+    const routingParams: RouteRequest = {
+      urgency: urgency ? String(urgency).toUpperCase() : 'ROUTINE',
+      requiredSpecialty: requiredSpecialty || specialty,
+      requiredService,
+      requiredBedType: requiredBedType ? String(requiredBedType).toUpperCase() : undefined,
+      patientLocation,
+      excludeFacilityIds,
+      maxDistanceKm,
+      limit
+    };
+
+    const ranked = await calculateOptimalRoutes(routingParams);
+
+    const totalEvaluated = ranked.length;
+    const eligibleCount = ranked.filter((f) => f.eligible).length;
+    const ineligibleCount = totalEvaluated - eligibleCount;
+    const hasCalculatedDistance = ranked.some((f) => f.distanceStatus === 'CALCULATED');
+    const distanceHandling = hasCalculatedDistance ? 'CALCULATED' : 'NOT_SUPPORTED_BY_SCHEMA';
+
+    return res.json({
+      ranked_facilities: ranked,
+      meta: {
+        totalEvaluated,
+        eligibleCount,
+        ineligibleCount,
+        urgency: routingParams.urgency,
+        weightsUsed: ROUTING_WEIGHTS,
+        distanceHandling
+      }
+    });
+  } catch (error: any) {
+    console.error('Error calculating facility routing:', error);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
 

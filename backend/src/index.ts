@@ -7,6 +7,7 @@ import { PrismaClient } from '@prisma/client';
 
 // Load environment variables (from .env file)
 dotenv.config();
+dotenv.config({ override: true });
 
 // Initialize Prisma Client
 const prisma = new PrismaClient();
@@ -68,6 +69,15 @@ import followupRoutes from './modules/followups/followup.routes';
 import aiRoutes from './modules/ai/ai.routes';
 import notificationRoutes from './modules/notifications/notification.routes';
 import diagnosticRoutes from './modules/diagnostics/diagnostic.routes';
+import predictionRoutes from './modules/prediction/prediction.routes';
+import interopRoutes from './modules/interop/interop.routes';
+import teleconsultationRoutes from './modules/appointments/teleconsultation.routes';
+import inventoryRoutes from './modules/inventory/inventory.routes';
+import agentGraphRoutes from './modules/ai/agent_graph.routes';
+import i18nRoutes from './modules/i18n/i18n.routes';
+import voiceRoutes from './modules/voice/voice.routes';
+import routingRoutes from './modules/routing/routing.routes';
+import assistantRoutes from './modules/assistant/health_assistant.routes';
 import { startJobs } from './jobs/caregap.job';
 
 app.use('/api/auth', authRoutes);
@@ -77,12 +87,21 @@ app.use('/api/facilities', facilityRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/queue', queueRoutes);
 app.use('/api/appointments', appointmentRoutes);
+app.use('/api/teleconsultation', teleconsultationRoutes);
+app.use('/api/inventory', inventoryRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/predictions', predictionRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/followups', followupRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/ai/agent/graph', agentGraphRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/diagnostics', diagnosticRoutes);
+app.use('/api/interop', interopRoutes);
+app.use('/api/i18n', i18nRoutes);
+app.use('/api/voice', voiceRoutes);
+app.use('/api/routing', routingRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 
 // Health check and system verification
@@ -111,9 +130,11 @@ app.get('/api/health', healthHandler);
 
 // Start the server
 const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => {
-  console.log(`AyuSync Backend is running on http://localhost:${PORT}`);
-  startJobs();
-});
+if (process.env.SKIP_SERVER_LISTEN !== 'true') {
+  httpServer.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`AyuSync Backend is running on http://localhost:${PORT}`);
+    startJobs();
+  });
+}
 
-export { app, prisma, io };
+export { app, httpServer, prisma, io };

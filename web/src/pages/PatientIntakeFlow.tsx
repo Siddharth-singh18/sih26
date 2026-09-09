@@ -285,8 +285,11 @@ export default function PatientIntakeFlow() {
 
       if (routeRes?.data?.ranked_facilities) {
         setRankedFacilities(routeRes.data.ranked_facilities);
-        if (routeRes.data.ranked_facilities.length > 0) {
-          setSelectedFacility(routeRes.data.ranked_facilities[0].facility_id);
+        const firstEligible = routeRes.data.ranked_facilities.find((f: any) => f.eligible !== false);
+        if (firstEligible) {
+          setSelectedFacility(firstEligible.facility_id || firstEligible.id);
+        } else if (routeRes.data.ranked_facilities.length > 0) {
+          setSelectedFacility(routeRes.data.ranked_facilities[0].facility_id || routeRes.data.ranked_facilities[0].id);
         }
       }
 
@@ -1027,6 +1030,7 @@ export default function PatientIntakeFlow() {
               {(rankedFacilities.length > 0 ? rankedFacilities : facilities).map((fac: any) => {
                 const facId = fac.facility_id || fac.id;
                 const isSelected = selectedFacility === facId;
+                const isEligible = fac.eligible ?? fac.isEligible ?? true;
                 return (
                   <div
                     key={facId}
@@ -1034,23 +1038,48 @@ export default function PatientIntakeFlow() {
                     className={`p-4 rounded-xl border cursor-pointer transition-all ${
                       isSelected
                         ? 'border-[#1e6641] bg-[#e4efe7]/30 ring-2 ring-[#1e6641]/20'
-                        : 'border-gray-100 bg-white hover:bg-gray-50'
+                        : isEligible
+                        ? 'border-gray-100 bg-white hover:bg-gray-50'
+                        : 'border-red-200 bg-red-50/20 opacity-85'
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <div className="text-sm font-bold text-gray-900">{fac.facility_name || fac.name}</div>
-                      {fac.score && (
-                        <span className="text-xs font-bold text-[#1e6641] bg-[#e4efe7] px-2 py-0.5 rounded-full">
-                          {fac.score} / 100 Match
-                        </span>
-                      )}
+                      <div className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                        {fac.facility_name || fac.name}
+                        {fac.level && <span className="text-[10px] text-gray-500 font-normal">(Level {fac.level})</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {!isEligible && (
+                          <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
+                            Ineligible
+                          </span>
+                        )}
+                        {fac.score !== undefined && (
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                            isEligible ? 'text-[#1e6641] bg-[#e4efe7]' : 'text-gray-500 bg-gray-100'
+                          }`}>
+                            {fac.score} / 100
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <div className="text-xs text-gray-500 flex items-center gap-2">
                       <span>{fac.type || 'Hospital'}</span>
-                      {fac.distance_km && <span>· ~{fac.distance_km} km away</span>}
+                      {fac.distance_km != null ? (
+                        <span>· ~{fac.distance_km} km away</span>
+                      ) : (
+                        <span>· Distance not in schema</span>
+                      )}
                       {fac.estimated_travel_time_minutes && <span>· ~{fac.estimated_travel_time_minutes} mins</span>}
                     </div>
-                    {fac.reasons?.length > 0 && (
+
+                    {!isEligible && fac.ineligibilityReasons?.length > 0 && (
+                      <div className="text-[11px] text-red-700 mt-2 p-1.5 bg-red-50 rounded border border-red-100">
+                        <strong>Ineligible:</strong> {fac.ineligibilityReasons.join('; ')}
+                      </div>
+                    )}
+
+                    {isEligible && fac.reasons?.length > 0 && (
                       <div className="text-[11px] text-[#1e6641] mt-2 flex items-center gap-1">
                         <CheckCircle2 size={12} />
                         {fac.reasons.join(' · ')}

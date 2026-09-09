@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../../index';
+import { recordAuditLog } from '../audit/audit.service';
 
 /**
  * OFFLINE SYNC MUTATION BATCH (PUSH)
@@ -36,6 +37,66 @@ export const processSyncBatch = async (req: Request, res: Response) => {
 
       try {
         await prisma.$transaction(async (tx) => {
+          // Stale Client Collision Conflict Detection
+          let isConflict = false;
+          let serverRecord: any = null;
+
+          if (action === 'UPDATE' && payload.id) {
+            if (entity === 'PATIENT') {
+              serverRecord = await tx.patient.findUnique({ where: { id: payload.id } });
+            } else if (entity === 'FOLLOWUP') {
+              serverRecord = await tx.followUp.findUnique({ where: { id: payload.id } });
+            } else if (entity === 'REFERRAL') {
+              serverRecord = await tx.referral.findUnique({ where: { id: payload.id } });
+            }
+
+            if (serverRecord && mutation.timestamp) {
+              const clientTime = new Date(mutation.timestamp).getTime();
+              const serverTime = serverRecord.updatedAt ? new Date(serverRecord.updatedAt).getTime() : 0;
+              // If server was modified after the client's snapshot timestamp
+              if (serverTime > clientTime + 500) {
+                isConflict = true;
+              }
+            }
+          }
+
+          if (isConflict) {
+            await tx.syncOperation.create({
+              data: {
+                id: operationId,
+                userId: workerId || 'unknown-worker',
+                deviceId: mutation.deviceId || 'unknown',
+                entity,
+                entityId: payload.id || 'unknown',
+                operation: action,
+                payload: {
+                  clientPayload: payload,
+                  serverPayload: serverRecord
+                },
+                clientTimestamp: mutation.timestamp ? new Date(mutation.timestamp) : new Date(),
+                status: 'CONFLICT'
+              }
+            });
+
+            await recordAuditLog({
+              userId: workerId || null,
+              action: 'SYNC_CONFLICT_DETECTED',
+              resource: entity,
+              resourceId: payload.id || null
+            }, tx);
+
+            results.push({
+              operationId,
+              status: 'CONFLICT',
+              conflict: {
+                serverState: serverRecord,
+                clientState: payload,
+                reason: 'STALE_CLIENT_UPDATE'
+              }
+            });
+            return;
+          }
+
           if (entity === 'PATIENT') {
             if (action === 'CREATE') {
               await tx.patient.create({ data: payload });
@@ -88,11 +149,18 @@ export const processSyncBatch = async (req: Request, res: Response) => {
               status: 'SUCCESS'
             }
           });
-        });
 
-        results.push({ operationId, status: 'SUCCESS' });
+          await recordAuditLog({
+            userId: workerId || null,
+            action: `SYNC_${entity}_${action}`,
+            resource: entity,
+            resourceId: payload.id || null
+          }, tx);
+
+          results.push({ operationId, status: 'SUCCESS' });
+        });
       } catch (err: any) {
-        results.push({ operationId, status: 'CONFLICT', error: err.message });
+        results.push({ operationId, status: 'FAILED', error: err.message });
       }
     }
 

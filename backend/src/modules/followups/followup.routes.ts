@@ -2,13 +2,16 @@ import { Router } from 'express';
 import { authenticate } from '../../middleware/auth';
 import { createCounterReferral, listFollowUps, completeFollowUp } from './followup.controller';
 
+import { requireRole } from '../../middleware/rbac';
+
 const router = Router();
 
 // All followup routes require authentication
 router.use(authenticate);
 
 // POST /api/followups/counter-referral — doctor closes the loop after consultation
-router.post('/counter-referral', createCounterReferral);
+router.post('/counter-referral', requireRole('DOCTOR'), createCounterReferral);
+router.post('/', requireRole('DOCTOR'), createCounterReferral);
 
 // GET /api/followups?status=PENDING|OVERDUE|COMPLETED — worker or doctor fetches tasks
 router.get('/', listFollowUps);

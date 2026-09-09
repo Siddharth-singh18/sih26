@@ -61,7 +61,8 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
 
       const linkedPatient = await prisma.patient.findFirst({
         where: { phone: { in: phoneVariants } },
-        select: { id: true }
+        select: { id: true },
+        orderBy: { createdAt: 'asc' }
       });
       if (linkedPatient) {
         patientId = linkedPatient.id;

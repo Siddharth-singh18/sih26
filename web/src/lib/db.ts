@@ -38,10 +38,18 @@ export class AyuSyncDB extends Dexie {
 
 export const db = new AyuSyncDB();
 
+export const generateDurableOperationId = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `op_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  }
+  return `op_${Date.now()}_${Date.now().toString(36)}`;
+};
+
 export const enqueueMutation = async (entity: string, action: string, payload: any) => {
-  const operationId = `op_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const operationId = generateDurableOperationId();
   
   await db.mutationQueue.add({
+    id: operationId,
     operationId,
     entity,
     action,
@@ -52,4 +60,20 @@ export const enqueueMutation = async (entity: string, action: string, payload: a
   });
 
   return operationId;
+};
+
+/**
+ * Session Security Isolation:
+ * Purges cached offline patient records and pending local mutation queues on user logout.
+ * Guarantees User A's offline patient data is never accessible to subsequent user sessions.
+ */
+export const clearOfflineDataOnLogout = async (): Promise<void> => {
+  try {
+    await Promise.all([
+      db.patients.clear(),
+      db.mutationQueue.clear()
+    ]);
+  } catch (err) {
+    console.error('Failed to clear offline local data on logout:', err);
+  }
 };

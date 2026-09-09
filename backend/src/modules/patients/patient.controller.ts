@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { prisma } from '../../index';
 import { AuthRequest } from '../../middleware/auth';
-import { broadcastQueueUpdate, broadcastPatientUpdate } from '../../events/socket';
+import { broadcastQueueUpdate, broadcastPatientUpdate, broadcastQueueLoad } from '../../events/socket';
 import { sanitizeString, validateAge, validatePhone, validateEnum } from '../../utils/validators';
 
 // 10. PATIENT RECORD: creation, search, profile, history, timeline
@@ -348,13 +348,15 @@ export const getMyHealthSummary = async (req: AuthRequest, res: Response) => {
 
     const abhaId = patient.identifiers?.find(i => i.type === 'ABHA')?.value || null;
 
-    // Collect latest vitals across recent encounters
+    // Collect latest vitals across patient encounters
+    const patientVitals = await prisma.vital.findMany({
+      where: { encounter: { patientId } },
+      orderBy: { measuredAt: 'desc' }
+    });
     const vitalsMap: Record<string, any> = {};
-    for (const enc of latestEncounters) {
-      for (const v of enc.vitals) {
-        if (!vitalsMap[v.type]) {
-          vitalsMap[v.type] = v;
-        }
+    for (const v of patientVitals) {
+      if (!vitalsMap[v.type]) {
+        vitalsMap[v.type] = v;
       }
     }
 
@@ -815,6 +817,24 @@ export const arriveMyAppointment = async (req: AuthRequest, res: Response) => {
 
     broadcastQueueUpdate(appointment.facilityId, appointment.doctorId, entryWithToken, patientId);
     broadcastPatientUpdate(patientId, 'appointment.arrived', { appointmentId, queueEntry: entryWithToken });
+
+    // Part B & G: Emit QUEUE_LOAD_CHANGED on arrival
+    try {
+      const activeCount = await prisma.queueEntry.count({
+        where: {
+          status: { in: ['WAITING', 'PRIORITY', 'IN_CONSULTATION'] },
+          appointment: { facilityId: appointment.facilityId }
+        }
+      });
+      broadcastQueueLoad(appointment.facilityId, {
+        activeQueueCount: activeCount,
+        entryId: queueEntry.id,
+        doctorId: appointment.doctorId,
+        patientId,
+        action: 'ARRIVED',
+        status: queueEntry.status
+      });
+    } catch {}
 
     res.json({
       success: true,
